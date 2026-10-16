@@ -1,5 +1,5 @@
 {
-  "version": "2.0.0-unified-5-in-1",
+  "version": "2.1.0-unified-5-in-1-live",
   "mode": "MODO_SOMBRA_SOLO_LECTURA",
   "min_net_profit_usd": 1.50,
   "watchlist_hf_threshold": 1.08,
@@ -66,6 +66,40 @@
       "swap_fee_rate": 0.0025
     }
   },
+  "auction_kick_markets": [
+    {
+      "protocol": "Lista_DAO_lisUSD",
+      "chain": "BNB",
+      "token_address": "0x0782b6d8c4551B9760e74c0545a9bCD90bdc41E5",
+      "min_collateral_ratio": 1.10,
+      "flat_kick_tip_usd": 15.0,
+      "percentage_kick_bonus_rate": 0.01
+    }
+  ],
+  "beefy_harvest_vaults": [
+    {
+      "vault_id": "pancake-cow-bsc-eth-wbnb-vault",
+      "chain": "BNB",
+      "vault_address": "0x015E2d1b7aC621370A24B7dd426EF1ef4DA99B86",
+      "call_fee_rate": 0.005
+    },
+    {
+      "vault_id": "pancake-cow-bsc-eth-btcb-vault",
+      "chain": "BNB",
+      "vault_address": "0x0A751Fec061327d7338a972d3D05b5d1A105bfDa",
+      "call_fee_rate": 0.005
+    }
+  ],
+  "perp_keeper_vaults": [
+    {
+      "protocol": "GMX_Vault_Arbitrum",
+      "chain": "ARBITRUM",
+      "vault_address": "0x489ee077994B6658eAfA855c308275EAd8097C4A",
+      "index_token_weth": "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
+      "execution_fee_usd": 2.50,
+      "keeper_bonus_rate": 0.002
+    }
+  ],
   "lending_markets": [
     {
       "market_id": "Venus_Core_BSC",

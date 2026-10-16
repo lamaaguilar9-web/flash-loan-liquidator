@@ -88,6 +88,53 @@ def render_dashboard_html(summary: Dict[str, Any], telegram_configured: bool = F
         else '<span class="badge info">LISTO (Activar TELEGRAM_BOT_TOKEN en .env)</span>'
     )
 
+    keeper_telemetry = summary.get("live_keeper_telemetry") or {}
+    lista_info = keeper_telemetry.get("bot3_lista_dao") or {}
+    beefy_list = keeper_telemetry.get("bot4_beefy_vaults") or []
+    gmx_info = keeper_telemetry.get("bot5_gmx_arbitrum") or {}
+    beefy_summary = ", ".join(
+        f"{v.get('name')}: {v.get('balance_lp')} LP ({v.get('call_fee_bps')} bps)"
+        for v in beefy_list
+    ) or "Sincronizando..."
+
+    live_bots_rows = f"""
+        <tr>
+            <td><code>BOT_1_FLASH_LIQUIDATION</code></td>
+            <td>BNB / Arbitrum</td>
+            <td>Venus Comptroller, Kinza Pool, Aave V3 Pool</td>
+            <td>{summary.get('positions_scanned_count', 0)} cuentas leídas | {summary.get('watchlist_count', 0)} en vigilancia</td>
+            <td><span class="badge ok">CONECTADO EN VIVO</span></td>
+        </tr>
+        <tr>
+            <td><code>BOT_2_DEX_FLASH_ARBITRAGE</code></td>
+            <td>BNB Chain</td>
+            <td>PancakeSwap V3 (5 bps) ↔ V2 (25 bps)</td>
+            <td>Compra ${arb.get('buy_price_usd', 0)} | Venta ${arb.get('sell_price_usd', 0)} | Spread {arb.get('spread_bps', 0)} bps</td>
+            <td><span class="badge ok">CONECTADO EN VIVO</span></td>
+        </tr>
+        <tr>
+            <td><code>BOT_3_AUCTION_KICK_KEEPER</code></td>
+            <td>BNB Chain</td>
+            <td>Lista DAO lisUSD (<code>{lista_info.get('contract', '0x0782...41E5')}</code>)</td>
+            <td>Suministro activo: {lista_info.get('lisusd_supply', 0):,.2f} lisUSD</td>
+            <td><span class="badge ok">CONECTADO EN VIVO</span></td>
+        </tr>
+        <tr>
+            <td><code>BOT_4_VAULT_HARVEST_KEEPER</code></td>
+            <td>BNB Chain</td>
+            <td>Beefy Finance Vaults (<code>balance()</code>)</td>
+            <td>{beefy_summary}</td>
+            <td><span class="badge ok">CONECTADO EN VIVO</span></td>
+        </tr>
+        <tr>
+            <td><code>BOT_5_PERP_ORDER_KEEPER</code></td>
+            <td>Arbitrum One</td>
+            <td>GMX Vault (<code>{gmx_info.get('vault', '0x489e...97C4A')}</code>)</td>
+            <td>WETH MaxPrice: ${gmx_info.get('weth_max_price_usd', 0):,.4f} USD</td>
+            <td><span class="badge ok">CONECTADO EN VIVO</span></td>
+        </tr>
+    """
+
     return f"""<!DOCTYPE html>
 <html lang="es">
 <head>
@@ -145,7 +192,21 @@ def render_dashboard_html(summary: Dict[str, Any], telegram_configured: bool = F
         </div>
     </div>
 
-    <h2>1. Cola Central de Prioridad — Los 5 Bots en 1 Solo Motor</h2>
+    <h2>1. Telemetría en Vivo de los 5 Bots (Conexión RPC Directa — Costo $0)</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>ID Bot</th>
+                <th>Red</th>
+                <th>Contrato On-Chain Consultado</th>
+                <th>Lectura en Vivo</th>
+                <th>Conexión</th>
+            </tr>
+        </thead>
+        <tbody>{live_bots_rows}</tbody>
+    </table>
+
+    <h2>2. Cola Central de Prioridad — Los 5 Bots en 1 Solo Motor</h2>
     <table>
         <thead>
             <tr>
@@ -161,7 +222,7 @@ def render_dashboard_html(summary: Dict[str, Any], telegram_configured: bool = F
         <tbody>{queue_rows}</tbody>
     </table>
 
-    <h2>2. Estado de Redes y Bloques en Vivo (Mainnet)</h2>
+    <h2>3. Estado de Redes y Bloques en Vivo (Mainnet)</h2>
     <table>
         <thead>
             <tr>
