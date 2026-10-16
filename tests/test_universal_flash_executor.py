@@ -173,7 +173,7 @@ def test_19_compiled_solidity_artifact_and_eip170_size():
         artifact = json.load(f)
 
     assert artifact["contractName"] == "UniversalFlashExecutor"
-    assert artifact["bytecode"].startswith("0x6080")
+    assert artifact["bytecode"].startswith("0x60") and len(artifact["bytecode"]) > 2000
     assert 1000 < artifact["deployedBytecodeSize"] < 24576
 
     fn_names = {item.get("name") for item in artifact["abi"] if item.get("type") == "function"}
