@@ -1,0 +1,121 @@
+{
+  "version": "1.0.0-shadow",
+  "mode": "MODO_SOMBRA_SOLO_LECTURA",
+  "min_net_profit_usd": 1.50,
+  "watchlist_hf_threshold": 1.08,
+  "liquidation_hf_threshold": 1.00,
+  "max_flash_loan_usd": 250000.0,
+  "default_gas_limit": 450000,
+  "rpc_endpoints": {
+    "BNB": [
+      "https://bsc-rpc.publicnode.com",
+      "https://bsc-dataseed.binance.org/",
+      "https://1rpc.io/bnb"
+    ],
+    "ARBITRUM": [
+      "https://arbitrum-one-rpc.publicnode.com",
+      "https://arb1.arbitrum.io/rpc"
+    ]
+  },
+  "chainlink_feeds": {
+    "BNB": {
+      "BNB_USD": {
+        "address": "0x0567F2323251f0Aab15c8dFb1967E4e8A7D42aeE",
+        "decimals": 8,
+        "max_staleness_seconds": 3600
+      },
+      "BTC_USD": {
+        "address": "0x264990fbd0A4796A3E3d8E37C4d5F87a3aCa5Ebf",
+        "decimals": 8,
+        "max_staleness_seconds": 3600
+      },
+      "ETH_USD": {
+        "address": "0x9ef1B8c0E4F7dc8bF5719Ea496883DC6401d5b2e",
+        "decimals": 8,
+        "max_staleness_seconds": 3600
+      },
+      "USDT_USD": {
+        "address": "0xB97Ad0E74fa7d920791E90258A6E2085088b4320",
+        "decimals": 8,
+        "max_staleness_seconds": 86400
+      }
+    },
+    "ARBITRUM": {
+      "ETH_USD": {
+        "address": "0x639Fe6ab55C921f74e7fac1ee960C0B6293ba612",
+        "decimals": 8,
+        "max_staleness_seconds": 3600
+      },
+      "ARB_USD": {
+        "address": "0xb2A824043730FE05F3DA2efaFa1CBbe83fa548D6",
+        "decimals": 8,
+        "max_staleness_seconds": 3600
+      }
+    }
+  },
+  "dex_liquidity_pools": {
+    "PancakeSwap_V3_WBNB_USDT": {
+      "chain": "BNB",
+      "address": "0x36696169C63e42cd08ce11f5deeBbCeBae652050",
+      "flash_fee_rate": 0.0005,
+      "swap_fee_rate": 0.0005
+    }
+  },
+  "lending_markets": [
+    {
+      "market_id": "Venus_Core_BSC",
+      "chain": "BNB",
+      "protocol": "Venus Protocol",
+      "architecture": "compound_v2",
+      "controller_address": "0xfD36E2c2a6789Db23113685031d7F16329158384",
+      "close_factor": 0.50,
+      "liquidation_bonus": 0.10,
+      "flash_loan_provider": "PancakeSwap_V3",
+      "flash_loan_fee_rate": 0.0005,
+      "dex_swap_fee_rate": 0.0005,
+      "vtokens": [
+        "0xfD5840Cd36d94D7229439859C0112a4185BC0255",
+        "0xA07c5b74C9B40447a954e1466938b865b6BBea36",
+        "0xecA88125a5ADbe82614ffC12D0DB554E2e2867C8",
+        "0x882C173bC7Ff3b7786CA16dfeD3DFFfb9Ee7847B",
+        "0xf508fCD89b8bd15579dc79A6827cB4686A3592c8"
+      ],
+      "seed_borrowers": [
+        "0x955b7a7ddcbf443d0e6b899ba1aba71f7413272f",
+        "0xcfb9bef5f7b748ac72311f057f3a888bc73334d9",
+        "0x489A8756C18C0b8B24EC2a2b9FF3D4d447F79BEc"
+      ]
+    },
+    {
+      "market_id": "Kinza_Finance_BSC",
+      "chain": "BNB",
+      "protocol": "Kinza Finance (Aave v3 BSC)",
+      "architecture": "aave_v3",
+      "controller_address": "0xcb0620b181140e57d1C0D8b724cde623cA963c8C",
+      "close_factor": 0.50,
+      "liquidation_bonus": 0.075,
+      "flash_loan_provider": "PancakeSwap_V3",
+      "flash_loan_fee_rate": 0.0005,
+      "dex_swap_fee_rate": 0.0005,
+      "seed_borrowers": [
+        "0x955b7a7ddcbf443d0e6b899ba1aba71f7413272f",
+        "0x489A8756C18C0b8B24EC2a2b9FF3D4d447F79BEc"
+      ]
+    },
+    {
+      "market_id": "Aave_V3_Arbitrum",
+      "chain": "ARBITRUM",
+      "protocol": "Aave V3 Arbitrum",
+      "architecture": "aave_v3",
+      "controller_address": "0x794a61358D6845594F94dc1DB02A252b5b4814aD",
+      "close_factor": 0.50,
+      "liquidation_bonus": 0.05,
+      "flash_loan_provider": "Aave_V3_Flash",
+      "flash_loan_fee_rate": 0.0005,
+      "dex_swap_fee_rate": 0.0005,
+      "seed_borrowers": [
+        "0x794a61358D6845594F94dc1DB02A252b5b4814aD"
+      ]
+    }
+  ]
+}
