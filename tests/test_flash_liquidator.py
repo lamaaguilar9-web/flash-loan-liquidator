@@ -294,3 +294,84 @@ def test_12_shadow_logger_sha256_attestation_and_test_isolation():
 
         all_recs = logger.read_recent_liquidations(include_tests=True)
         assert len(all_recs) == 2
+
+
+from commission_strategies import (
+    decode_uniswap_v2_reserves,
+    UnifiedCommissionEngine
+)
+
+
+def test_13_uniswap_v2_reserves_decoding():
+    """Verifies PancakeSwap V2 getReserves() decoding and spot price calculation."""
+    raw = _pack_words(28785000 * (10 ** 18), 39500 * (10 ** 18), 1760570000)
+    res = decode_uniswap_v2_reserves(raw)
+    assert res["is_valid"] is True
+    assert res["spot_price_usd"] == pytest.approx(28785000.0 / 39500.0, rel=1e-4)
+
+
+def test_14_unified_dex_flash_swap_arbitrage_profitable_and_unprofitable():
+    """Verifies atomic DEX-to-DEX Flash Swap arbitrage spread math and revert threshold."""
+    engine = UnifiedCommissionEngine({"min_net_profit_usd": 1.50})
+    # Profitable spread: $720 on V3 vs $726 on V2 (83 bps spread on $5,000 notional)
+    arb_ok = engine.evaluate_dex_flash_arbitrage(
+        pair_symbol="WBNB/USDT",
+        chain="BNB",
+        pool_a_name="PancakeSwap_V3",
+        pool_a_price_usd=720.0,
+        pool_a_fee_rate=0.0005,
+        pool_b_name="PancakeSwap_V2",
+        pool_b_price_usd=726.0,
+        pool_b_fee_rate=0.0025,
+        trade_notional_usd=5000.0,
+        native_token_price_usd=720.0,
+        gas_price_gwei=0.05
+    )
+    assert arb_ok["would_execute_atomic"] is True
+    assert arb_ok["net_profit_usd"] > 20.0
+
+    # Tight spread (2 bps): should revert because swap fees + slippage exceed spread
+    arb_rev = engine.evaluate_dex_flash_arbitrage(
+        pair_symbol="WBNB/USDT",
+        chain="BNB",
+        pool_a_name="PancakeSwap_V3",
+        pool_a_price_usd=728.00,
+        pool_a_fee_rate=0.0005,
+        pool_b_name="PancakeSwap_V2",
+        pool_b_price_usd=728.15,
+        pool_b_fee_rate=0.0025,
+        trade_notional_usd=5000.0,
+        native_token_price_usd=728.0,
+        gas_price_gwei=0.05
+    )
+    assert arb_rev["would_execute_atomic"] is False
+    assert arb_rev["status"] == "REVERTED_SPREAD_BELOW_COSTS"
+
+
+def test_15_unified_keeper_harvest_and_kick_evaluation():
+    """Verifies Beefy harvest() / Lista DAO kick() callFee keeper evaluation."""
+    engine = UnifiedCommissionEngine({"min_net_profit_usd": 1.50})
+    res = engine.evaluate_keeper_harvest_or_kick(
+        vault_id="Beefy_Venus_USDT_Vault",
+        chain="BNB",
+        pending_rewards_usd=1200.0,
+        call_fee_rate=0.005,  # 0.5% callFee = $6.00
+        flat_incentive_usd=0.0,
+        native_token_price_usd=727.0,
+        gas_price_gwei=0.05
+    )
+    assert res["would_execute_atomic"] is True
+    assert res["net_profit_usd"] > 5.90
+
+
+def test_16_central_profit_priority_queue_orders_highest_earner_first():
+    """Verifies the single-engine priority queue ranks all strategies by highest net_profit_usd."""
+    opps = [
+        {"strategy_type": "KEEPER_HARVEST_AND_KICK", "would_execute_atomic": True, "net_profit_usd": 5.95},
+        {"strategy_type": "LIQUIDATION_FLASH_LOAN", "would_execute_atomic": True, "net_profit_usd": 310.40},
+        {"strategy_type": "DEX_FLASH_SWAP_ARBITRAGE", "would_execute_atomic": False, "net_profit_usd": -2.10},
+        {"strategy_type": "DEX_FLASH_SWAP_ARBITRAGE", "would_execute_atomic": True, "net_profit_usd": 24.80}
+    ]
+    ranked = UnifiedCommissionEngine.rank_unified_opportunities(opps)
+    assert len(ranked) == 3
+    assert [r["net_profit_usd"] for r in ranked] == [310.40, 24.80, 5.95]
