@@ -1,32 +1,42 @@
-# Sentinel Fleet — Flash Loan Liquidator (Módulo C — Fase 1: Modo Sombra)
+# Sentinel Fleet — Motor Único 5-en-1 de Comisiones On-Chain (`flash-loan-liquidator`)
 
-Escáner determinista de solo lectura (*Shadow Mode*) para la detección y simulación de rentabilidad neta de liquidaciones atómicas con *Flash Loans* en protocolos de préstamos sobre **BNB Chain** (Venus Protocol, Kinza Finance) y **Arbitrum One** (Aave V3).
+Motor unificado de detección en Modo Sombra (**Fase 1 — Python**) y contrato inteligente ejecutor polimórfico atómico (**Fase 2 — Solidity `0.8.20`**) para las 5 estrategias de comisiones on-chain en **BNB Chain** y **Arbitrum One**:
+
+1. **Bot #1 (`BOT_1_FLASH_LIQUIDATION`):** Liquidaciones con Flash Loans en Venus Protocol, Kinza Finance y Aave V3 (bono `5% a 10%`).
+2. **Bot #2 (`BOT_2_DEX_FLASH_ARBITRAGE`):** Arbitraje Atómico DEX-a-DEX con Flash Swaps (`PancakeSwap V3` $\leftrightarrow$ `PancakeSwap V2` / `Thena`).
+3. **Bot #3 (`BOT_3_AUCTION_KICK_KEEPER`):** Bounties de inicio de subastas holandesas (`kick()` en **Lista DAO `lisUSD`** / Liquity forks).
+4. **Bot #4 (`BOT_4_VAULT_HARVEST_KEEPER`):** Cosechador de bóvedas de rendimiento (`harvest()` en **Beefy Finance**) cobrando el `callFee`.
+5. **Bot #5 (`BOT_5_PERP_ORDER_KEEPER`):** Keeper de órdenes límite, *stop-loss* y liquidaciones de perpetuos (`executeOrder()` en **ApolloX / GMX**).
 
 > **Estándar de Verificación:** Código auditado internamente con doble verificación independiente — un auditor línea a línea y una segunda opinión por muestreo, con la evidencia pública en el repositorio.
 
-## Arquitectura y Candados *Fail-Closed*
+---
 
-1. **`oracle_watcher.py`**:
-   * Consulta en vivo contratos agregadores de **Chainlink** (`latestRoundData` `0xfeaf968c` y `decimals` `0x313ce567`).
-   * Verifica la liquidez real en rango (`liquidity` `0x1a686502` y `slot0` `0x3850c7bd`) en **PancakeSwap V3**.
-   * **Candado Fail-Closed:** Rechaza rondas incompletas (`answeredInRound < roundId`), respuestas $\le 0$, o precios desactualizados (`age > max_staleness_seconds`).
-   * **Garantía de Solo Lectura:** El cliente RPC bloquea por código (`PermissionError`) cualquier método de escritura (`eth_sendRawTransaction`, etc.).
-2. **`position_indexer.py`**:
-   * Descubrimiento de prestatarios mediante lectura de eventos recientes (`eth_getLogs`) y semillas verificadas on-chain.
-   * Decodificación nativa de `getUserAccountData(address)` (`0xbf92857c`, arquitectura Aave V3 / Kinza) y `getAccountLiquidity(address)` (`0x5ec88c79`, arquitectura Compound V2 / Venus).
-3. **`profit_simulator.py`**:
-   * Cálculo exacto de ganancia neta simulada:
-     $$\text{PnL Neto} = \text{Bono Bruto de Liquidación} - \text{Comisión Flash Loan} - \text{Costo Swap DEX + Slippage Dinámico} - \text{Costo Gas USD}$$
-   * Si $\text{PnL Neto} < \text{Umbral Mínimo}$ (`$1.50 USD`) o si la posición es insolvente ($\text{Colateral Total} < \text{Deuda a Cubrir}$), simula la reversión atómica con `$0.00` de pérdida de capital.
-4. **`shadow_logger.py`**:
-   * Bitácora apendizable en `data/shadow_liquidations.jsonl` y `data/shadow_telemetry.jsonl` con sello de integridad `record_sha256` por registro y separación estricta de banderas `is_test`.
+## Arquitectura Fase 1 (Modo Sombra) y Fase 2 (Contrato Atómico)
 
-## Ejecución
+* **Fase 1 (Python Read-Only Engine):**
+  * [`oracle_watcher.py`](./oracle_watcher.py): Lector `eth_call` de oráculos Chainlink (`latestRoundData` `0xfeaf968c`) y liquidez concentrada (`slot0` / `liquidity`) con candados *fail-closed*.
+  * [`position_indexer.py`](./position_indexer.py): Descubrimiento dinámico de prestatarios vía `eth_getLogs` y decodificación de `getUserAccountData` (`0xbf92857c`) y `getAccountLiquidity` (`0x5ec88c79`).
+  * [`profit_simulator.py`](./profit_simulator.py) y [`commission_strategies.py`](./commission_strategies.py): Evaluación matemática determinista de los 5 bots y **Cola Central de Prioridad (`rank_unified_opportunities`)** en un solo proceso de memoria RAM.
+* **Fase 2 (Smart Contract Polimórfico en Solidity):**
+  * [`contracts/UniversalFlashExecutor.sol`](./contracts/UniversalFlashExecutor.sol):
+    * Compilado con `solc 0.8.20+commit.a1b79de6` (`viaIR: true`, `0` errores, `8,130` bytes).
+    * **Autenticación de Callbacks (`_callbackContext`):** Bloquea llamadas directas o suplantadas a `pancakeV3FlashCallback` y `executeOperation` (`UnauthorizedCallbackCaller` / `UnauthorizedFlashInitiator`).
+    * **Whitelist de Contratos (`whitelistedTargets`):** Impide inyección de llamadas arbitrarias.
+    * **Cero Aprobaciones Residuales (`_safeApproveExact`):** Resetea el `allowance` a `0` antes y después de cada operación.
+    * **Invariante Atómica de Ganancia Neta (`AtomicRevertInsufficientNetProfit`):** Si la ganancia neta transferida a `owner` al final de la transacción es menor que `minNetProfit`, revierte toda la transacción con `$0.00` de pérdida de capital y mantiene `$0.00` de saldo custodial en el contrato.
+
+---
+
+## Comandos de Compilación y Auditoría
 
 ```bash
-# Ejecutar suite de pruebas (12 tests deterministas)
+# 1. Compilar el Smart Contract (Fase 2) con solc 0.8.20
+node compile_check.js
+
+# 2. Ejecutar la suite completa de 23 pruebas (Fase 1 + Fase 2)
 pytest -v
 
-# Ejecutar un ciclo de escaneo en vivo (BNB Chain + Arbitrum) con prueba de estrés de parámetros reales
+# 3. Ejecutar un ciclo en vivo del Motor 5-en-1 en Modo Sombra
 python shadow_scanner.py --chains BNB ARBITRUM --cycles 1 --simulate-stress
 ```
