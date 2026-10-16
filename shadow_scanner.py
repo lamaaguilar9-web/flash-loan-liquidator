@@ -25,6 +25,8 @@ from commission_strategies import (
     UnifiedCommissionEngine
 )
 from shadow_logger import ShadowLogger
+from telegram_notifier import TelegramCommissionNotifier
+from dashboard_generator import write_dashboard_files
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("ShadowScanner")
@@ -50,6 +52,7 @@ class FlashLoanShadowScanner:
         self.profit_simulator = ProfitSimulator(self.config)
         self.unified_engine = UnifiedCommissionEngine(self.config)
         self.shadow_logger = shadow_logger or ShadowLogger()
+        self.telegram_notifier = TelegramCommissionNotifier()
 
     def run_scan_cycle(self, chains: Optional[List[str]] = None, simulate_stress: bool = False) -> Dict[str, Any]:
         """Executes one complete read-only scan cycle for all 5 commission strategies in one memory loop."""
@@ -263,6 +266,10 @@ class FlashLoanShadowScanner:
             "stress_evaluations": stress_evaluations,
             "stress_priority_queue": stress_priority_queue
         }
+        for live_opp in summary["live_priority_queue"]:
+            self.telegram_notifier.notify_opportunity(live_opp, is_live_execution=False)
+
+        write_dashboard_files(summary, telegram_configured=self.telegram_notifier.is_configured)
         self.shadow_logger.log_telemetry_cycle(summary, is_test=simulate_stress)
         return summary
 

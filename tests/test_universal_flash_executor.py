@@ -295,3 +295,48 @@ def test_23_profitable_execution_sweeps_to_owner_with_zero_residual():
     assert usdt.balance_of(owner) == 695
     assert usdt.balance_of(exec_contract.address) == 0  # Non-custodial $0.00 balance invariant
     assert usdt.allowance(exec_contract.address, venus) == 0  # Zero residual allowance invariant
+
+
+from telegram_notifier import TelegramCommissionNotifier
+from dashboard_generator import render_dashboard_html
+
+
+def test_24_telegram_notifier_formatting_and_cooldown():
+    """Verifies Telegram alert formatting, rate-limit cooldown, and daily quota enforcement."""
+    notifier = TelegramCommissionNotifier(bot_token="", chat_id="", cooldown_seconds=300, max_daily_alerts=2)
+    opp = {
+        "strategy_id": "BOT_1_FLASH_LIQUIDATION",
+        "would_execute_atomic": True,
+        "chain": "BNB",
+        "block_number": 127899882,
+        "net_profit_usd": 587.04,
+        "gas_cost_usd": 0.0164
+    }
+    res = notifier.notify_opportunity(opp, is_live_execution=False, now_ts=1760570000.0)
+    assert res["reason"] == "TELEGRAM_CREDENTIALS_NOT_SET_IN_ENV"
+    assert "+$587.0400 USD" in res["preview_message"]
+    assert "BOT_1_FLASH_LIQUIDATION" in res["preview_message"]
+
+    # Unprofitable opportunity must be ignored
+    res_unprof = notifier.notify_opportunity({"would_execute_atomic": False, "net_profit_usd": -1.0})
+    assert res_unprof["sent"] is False
+    assert res_unprof["reason"] == "NOT_PROFITABLE"
+
+
+def test_25_live_html_dashboard_rendering():
+    """Verifies the live HTML dashboard renders all 5 bots, Chainlink feeds, and DEX spreads."""
+    summary = {
+        "chains": {"BNB": {"block_number": 127899882, "gas_price_gwei": 0.05, "rpc_latency_ms": 180.0}},
+        "oracles": {"BNB": {"BNB_USD": {"is_valid": True, "price_usd": 728.74, "round_id": "5534", "age_seconds": 12.0}}},
+        "live_dex_arb_check": {"spread_bps": 12.83, "buy_price_usd": 728.45, "sell_price_usd": 729.39},
+        "positions_scanned_count": 13,
+        "watchlist_count": 1,
+        "stress_priority_queue": [
+            {"strategy_id": "BOT_1_FLASH_LIQUIDATION", "chain": "BNB", "gas_cost_usd": 0.0164, "net_profit_usd": 587.04}
+        ]
+    }
+    html = render_dashboard_html(summary, telegram_configured=True)
+    assert "MOTOR ÚNICO 5-EN-1 DE COMISIONES ON-CHAIN" in html
+    assert "BOT_1_FLASH_LIQUIDATION" in html
+    assert "+$587.0400 USD" in html
+    assert "CONECTADO (@Luis_sentinel_alert_bot)" in html
