@@ -1,5 +1,5 @@
 {
-  "version": "1.0.0-shadow",
+  "version": "2.0.0-unified-5-in-1",
   "mode": "MODO_SOMBRA_SOLO_LECTURA",
   "min_net_profit_usd": 1.50,
   "watchlist_hf_threshold": 1.08,
@@ -59,6 +59,11 @@
       "address": "0x36696169C63e42cd08ce11f5deeBbCeBae652050",
       "flash_fee_rate": 0.0005,
       "swap_fee_rate": 0.0005
+    },
+    "PancakeSwap_V2_WBNB_USDT": {
+      "chain": "BNB",
+      "address": "0x16b9a82891338f9bA80E2D6970FddA79D1eb0daE",
+      "swap_fee_rate": 0.0025
     }
   },
   "lending_markets": [

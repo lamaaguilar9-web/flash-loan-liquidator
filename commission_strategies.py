@@ -1,18 +1,24 @@
 """
-Flash Loan Liquidator (Module C) - Unified Single-Engine Multi-Strategy Module.
+Flash Loan Liquidator (Module C) - Unified 5-in-1 On-Chain Commission Engine.
 
-Combines three on-chain commission strategies inside a single memory space and event loop
-(sharing the same RPC session, block state, and gas/oracle telemetry):
-  1. Strategy A (LIQUIDATION_FLASH_LOAN): Lending protocol liquidations (5%-10% bonus)
-  2. Strategy B (DEX_FLASH_SWAP_ARBITRAGE): Atomic DEX-to-DEX spread arbitrage (PancakeSwap V3 <-> V2)
-  3. Strategy C (KEEPER_HARVEST_AND_KICK): Public vault harvest() & auction kick() callFee keeper
-Includes a central Profit Priority Queue so the single engine ranks all opportunities by
-highest net_profit_usd without RAM contention or wallet nonce collisions.
+Runs all 5 on-chain commission bots inside a single process, sharing one memory space,
+one RPC connection pool, and one central Profit Priority Queue:
+  1. Bot #1 (STRATEGY_1_FLASH_LIQUIDATION): Lending liquidations with Flash Loans (Venus/Kinza/Aave)
+  2. Bot #2 (STRATEGY_2_DEX_FLASH_ARBITRAGE): Atomic DEX-to-DEX Flash Swap arbitrage (PancakeSwap V3 <-> V2)
+  3. Bot #3 (STRATEGY_3_AUCTION_KICK_KEEPER): Collateralized stablecoin Dutch Auction kick() keeper (Lista DAO)
+  4. Bot #4 (STRATEGY_4_VAULT_HARVEST_KEEPER): Auto-compounding yield vault harvest() callFee keeper (Beefy)
+  5. Bot #5 (STRATEGY_5_PERP_ORDER_AND_LIQ_KEEPER): Perpetual DEX limit/stop-loss & margin liquidation keeper (GMX/ApolloX)
 """
 
 from typing import Dict, Any, List, Optional
 
-SELECTOR_GET_RESERVES_V2 = "0x0902f1ac"  # getReserves() -> (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast)
+# Canonical EVM Function Selectors
+SELECTOR_GET_RESERVES_V2 = "0x0902f1ac"   # getReserves() -> (uint112 reserve0, uint112 reserve1, uint32 ts)
+SELECTOR_HARVEST = "0x4641257d"           # harvest()
+SELECTOR_CALL_REWARD = "0x97fd323d"       # callReward() -> uint256
+SELECTOR_VAULT_BALANCE = "0xb69ef8a8"     # balance() -> uint256
+SELECTOR_AUCTION_KICK = "0x0203d8fb"      # kick(address,uint256)
+SELECTOR_EXECUTE_ORDER = "0x7e498c81"     # executeOrder(uint256,address)
 
 
 def decode_uniswap_v2_reserves(
@@ -49,14 +55,18 @@ def decode_uniswap_v2_reserves(
 
 class UnifiedCommissionEngine:
     """
-    Evaluates DEX Flash Swap Arbitrage and Keeper Call-Fee opportunities inside the same
-    single-process engine as Flash Loan Liquidations, ranking all results in a unified queue.
+    Unified 5-in-1 On-Chain Commission Engine:
+    Evaluates all 5 commission strategies in memory using shared RPC & Chainlink state,
+    and ranks all actionable opportunities in a single Profit Priority Queue.
     """
 
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         self.min_net_profit_usd = float(config.get("min_net_profit_usd", 1.50))
 
+    # ==========================================================================
+    # BOT #2: ARBITRAJE ATÓMICO DEX-A-DEX CON FLASH SWAPS
+    # ==========================================================================
     def evaluate_dex_flash_arbitrage(
         self,
         pair_symbol: str,
@@ -74,7 +84,7 @@ class UnifiedCommissionEngine:
         gas_limit: int = 280000
     ) -> Dict[str, Any]:
         """
-        Simulates an atomic Flash Swap arbitrage between Pool A and Pool B in a single transaction.
+        Bot #2: Simulates an atomic Flash Swap arbitrage between Pool A and Pool B in one block.
         """
         if (
             not oracle_is_valid
@@ -85,6 +95,7 @@ class UnifiedCommissionEngine:
             or trade_notional_usd <= 0.0
         ):
             return {
+                "strategy_id": "BOT_2_DEX_FLASH_ARBITRAGE",
                 "strategy_type": "DEX_FLASH_SWAP_ARBITRAGE",
                 "status": "ABORTED_INVALID_TELEMETRY",
                 "would_execute_atomic": False,
@@ -101,7 +112,7 @@ class UnifiedCommissionEngine:
         spread_ratio = (high_price - low_price) / low_price
         gross_spread_usd = trade_notional_usd * spread_ratio
 
-        # Deduct both pool swap fees + price impact slippage (8 bps) + on-chain gas
+        # Both pool swap fees + price impact slippage (8 bps) + on-chain gas
         total_fee_rate = pool_a_fee_rate + pool_b_fee_rate + 0.0008
         dex_fees_and_slippage_usd = trade_notional_usd * total_fee_rate
         gas_cost_usd = ((gas_limit * gas_price_gwei) / 1e9) * native_token_price_usd
@@ -110,6 +121,7 @@ class UnifiedCommissionEngine:
         would_execute = net_profit_usd >= self.min_net_profit_usd
 
         return {
+            "strategy_id": "BOT_2_DEX_FLASH_ARBITRAGE",
             "strategy_type": "DEX_FLASH_SWAP_ARBITRAGE",
             "status": "PROFITABLE_OPPORTUNITY_LOGGED" if would_execute else "REVERTED_SPREAD_BELOW_COSTS",
             "would_execute_atomic": would_execute,
@@ -117,8 +129,8 @@ class UnifiedCommissionEngine:
             "pair": pair_symbol,
             "buy_pool": buy_pool,
             "sell_pool": sell_pool,
-            "buy_price_usd": round(low_price, 6),
-            "sell_price_usd": round(high_price, 6),
+            "buy_price_usd": round(low_price, 4),
+            "sell_price_usd": round(high_price, 4),
             "spread_bps": round(spread_ratio * 10000, 2),
             "trade_notional_usd": round(trade_notional_usd, 2),
             "gross_spread_usd": round(gross_spread_usd, 4),
@@ -127,30 +139,111 @@ class UnifiedCommissionEngine:
             "net_profit_usd": net_profit_usd
         }
 
-    def evaluate_keeper_harvest_or_kick(
+    # ==========================================================================
+    # BOT #3: BOUNTIES DE "KICK" DE SUBASTAS (LISTA DAO / LIQUITY FORKS)
+    # ==========================================================================
+    def evaluate_auction_kick_bounty(
+        self,
+        protocol: str,
+        chain: str,
+        vault_owner: str,
+        collateral_usd: float,
+        debt_usd: float,
+        min_collateral_ratio: float,
+        flat_kick_tip_usd: float,
+        percentage_kick_bonus_rate: float,
+        native_token_price_usd: Optional[float],
+        gas_price_gwei: Optional[float],
+        oracle_is_valid: bool = True,
+        gas_limit: int = 260000
+    ) -> Dict[str, Any]:
+        """
+        Bot #3: Evaluates initiating a Dutch Auction liquidation (`kick`) on an undercollateralized
+        CDP vault (e.g. Lista DAO lisUSD on BNB Chain), earning flat tip + kick percentage incentive.
+        """
+        if (
+            not oracle_is_valid
+            or native_token_price_usd is None or native_token_price_usd <= 0.0
+            or gas_price_gwei is None or gas_price_gwei <= 0.0
+            or debt_usd <= 0.0
+            or min_collateral_ratio <= 1.0
+        ):
+            return {
+                "strategy_id": "BOT_3_AUCTION_KICK_KEEPER",
+                "strategy_type": "AUCTION_KICK_BOUNTY",
+                "status": "ABORTED_INVALID_TELEMETRY",
+                "would_execute_atomic": False,
+                "chain": chain,
+                "protocol": protocol,
+                "vault_owner": vault_owner,
+                "net_profit_usd": 0.0
+            }
+
+        current_icr = collateral_usd / debt_usd
+        if current_icr >= min_collateral_ratio:
+            return {
+                "strategy_id": "BOT_3_AUCTION_KICK_KEEPER",
+                "strategy_type": "AUCTION_KICK_BOUNTY",
+                "status": "SKIPPED_VAULT_ABOVE_MCR",
+                "would_execute_atomic": False,
+                "chain": chain,
+                "protocol": protocol,
+                "vault_owner": vault_owner,
+                "collateral_ratio": round(current_icr, 4),
+                "min_collateral_ratio": min_collateral_ratio,
+                "net_profit_usd": 0.0
+            }
+
+        gross_kick_bounty_usd = flat_kick_tip_usd + (debt_usd * percentage_kick_bonus_rate)
+        gas_cost_usd = ((gas_limit * gas_price_gwei) / 1e9) * native_token_price_usd
+        net_profit_usd = round(gross_kick_bounty_usd - gas_cost_usd, 4)
+        would_execute = net_profit_usd >= self.min_net_profit_usd
+
+        return {
+            "strategy_id": "BOT_3_AUCTION_KICK_KEEPER",
+            "strategy_type": "AUCTION_KICK_BOUNTY",
+            "status": "PROFITABLE_OPPORTUNITY_LOGGED" if would_execute else "SKIPPED_BOUNTY_BELOW_THRESHOLD",
+            "would_execute_atomic": would_execute,
+            "chain": chain,
+            "protocol": protocol,
+            "vault_owner": vault_owner,
+            "collateral_ratio": round(current_icr, 4),
+            "min_collateral_ratio": min_collateral_ratio,
+            "debt_usd": round(debt_usd, 2),
+            "flat_kick_tip_usd": round(flat_kick_tip_usd, 4),
+            "gross_kick_bounty_usd": round(gross_kick_bounty_usd, 4),
+            "gas_cost_usd": round(gas_cost_usd, 4),
+            "net_profit_usd": net_profit_usd
+        }
+
+    # ==========================================================================
+    # BOT #4: COSECHADORES DE BÓVEDAS (HARVEST KEEPERS — BEEFY FINANCE)
+    # ==========================================================================
+    def evaluate_vault_harvest_keeper(
         self,
         vault_id: str,
         chain: str,
         pending_rewards_usd: float,
         call_fee_rate: float,
-        flat_incentive_usd: float,
         native_token_price_usd: Optional[float],
         gas_price_gwei: Optional[float],
         oracle_is_valid: bool = True,
         gas_limit: int = 220000
     ) -> Dict[str, Any]:
         """
-        Evaluates whether calling a public vault harvest() or auction kick() function yields
-        net profit above gas and minimum threshold.
+        Bot #4: Evaluates calling public harvest() (selector 0x4641257d) on yield vaults
+        (e.g. Beefy Finance on BNB Chain / Arbitrum) to earn the immediate callFee reward.
         """
         if (
             not oracle_is_valid
             or native_token_price_usd is None or native_token_price_usd <= 0.0
             or gas_price_gwei is None or gas_price_gwei <= 0.0
             or pending_rewards_usd < 0.0
+            or call_fee_rate <= 0.0
         ):
             return {
-                "strategy_type": "KEEPER_HARVEST_AND_KICK",
+                "strategy_id": "BOT_4_VAULT_HARVEST_KEEPER",
+                "strategy_type": "VAULT_HARVEST_KEEPER",
                 "status": "ABORTED_INVALID_TELEMETRY",
                 "would_execute_atomic": False,
                 "chain": chain,
@@ -158,32 +251,135 @@ class UnifiedCommissionEngine:
                 "net_profit_usd": 0.0
             }
 
-        gross_commission_usd = (pending_rewards_usd * call_fee_rate) + flat_incentive_usd
+        gross_call_fee_usd = pending_rewards_usd * call_fee_rate
         gas_cost_usd = ((gas_limit * gas_price_gwei) / 1e9) * native_token_price_usd
-        net_profit_usd = round(gross_commission_usd - gas_cost_usd, 4)
+        net_profit_usd = round(gross_call_fee_usd - gas_cost_usd, 4)
         would_execute = net_profit_usd >= self.min_net_profit_usd
 
         return {
-            "strategy_type": "KEEPER_HARVEST_AND_KICK",
-            "status": "PROFITABLE_OPPORTUNITY_LOGGED" if would_execute else "SKIPPED_COMMISSION_BELOW_THRESHOLD",
+            "strategy_id": "BOT_4_VAULT_HARVEST_KEEPER",
+            "strategy_type": "VAULT_HARVEST_KEEPER",
+            "status": "PROFITABLE_OPPORTUNITY_LOGGED" if would_execute else "SKIPPED_HARVEST_BELOW_THRESHOLD",
             "would_execute_atomic": would_execute,
             "chain": chain,
             "vault_id": vault_id,
             "pending_rewards_usd": round(pending_rewards_usd, 4),
             "call_fee_bps": round(call_fee_rate * 10000, 2),
-            "flat_incentive_usd": round(flat_incentive_usd, 4),
-            "gross_commission_usd": round(gross_commission_usd, 4),
+            "gross_call_fee_usd": round(gross_call_fee_usd, 4),
             "gas_cost_usd": round(gas_cost_usd, 4),
             "net_profit_usd": net_profit_usd
         }
 
+    # ==========================================================================
+    # BOT #5: KEEPERS DE ÓRDENES LÍMITE Y PERPETUOS (GMX / GAINS / APOLLOX)
+    # ==========================================================================
+    def evaluate_perp_order_keeper(
+        self,
+        protocol: str,
+        chain: str,
+        order_id: str,
+        order_type: str,
+        direction: str,
+        trigger_price_usd: float,
+        current_oracle_price_usd: Optional[float],
+        position_size_usd: float,
+        execution_fee_usd: float,
+        keeper_bonus_rate: float,
+        native_token_price_usd: Optional[float],
+        gas_price_gwei: Optional[float],
+        oracle_is_valid: bool = True,
+        gas_limit: int = 310000
+    ) -> Dict[str, Any]:
+        """
+        Bot #5: Evaluates triggering a pending limit/stop-loss order or margin liquidation
+        on a Perpetual DEX (GMX v2 / ApolloX / Gains Network) when the Chainlink oracle price
+        crosses the trigger price.
+        """
+        if (
+            not oracle_is_valid
+            or current_oracle_price_usd is None or current_oracle_price_usd <= 0.0
+            or native_token_price_usd is None or native_token_price_usd <= 0.0
+            or gas_price_gwei is None or gas_price_gwei <= 0.0
+            or trigger_price_usd <= 0.0
+            or position_size_usd <= 0.0
+        ):
+            return {
+                "strategy_id": "BOT_5_PERP_ORDER_KEEPER",
+                "strategy_type": "PERP_ORDER_AND_LIQ_KEEPER",
+                "status": "ABORTED_INVALID_TELEMETRY",
+                "would_execute_atomic": False,
+                "chain": chain,
+                "protocol": protocol,
+                "order_id": order_id,
+                "net_profit_usd": 0.0
+            }
+
+        # Determine if trigger condition is met based on direction and order_type
+        # STOP_LOSS / LIQUIDATION on LONG triggers when current_price <= trigger_price
+        # STOP_LOSS / LIQUIDATION on SHORT triggers when current_price >= trigger_price
+        # TAKE_PROFIT on LONG triggers when current_price >= trigger_price
+        dir_upper = direction.upper()
+        otype_upper = order_type.upper()
+
+        if otype_upper in ("STOP_LOSS", "LIQUIDATION", "LIMIT_BUY"):
+            is_triggered = (
+                (current_oracle_price_usd <= trigger_price_usd)
+                if dir_upper == "LONG"
+                else (current_oracle_price_usd >= trigger_price_usd)
+            )
+        else:  # TAKE_PROFIT / LIMIT_SELL
+            is_triggered = (
+                (current_oracle_price_usd >= trigger_price_usd)
+                if dir_upper == "LONG"
+                else (current_oracle_price_usd <= trigger_price_usd)
+            )
+
+        if not is_triggered:
+            return {
+                "strategy_id": "BOT_5_PERP_ORDER_KEEPER",
+                "strategy_type": "PERP_ORDER_AND_LIQ_KEEPER",
+                "status": "SKIPPED_TRIGGER_PRICE_NOT_REACHED",
+                "would_execute_atomic": False,
+                "chain": chain,
+                "protocol": protocol,
+                "order_id": order_id,
+                "current_oracle_price_usd": round(current_oracle_price_usd, 4),
+                "trigger_price_usd": round(trigger_price_usd, 4),
+                "net_profit_usd": 0.0
+            }
+
+        gross_keeper_fee_usd = execution_fee_usd + (position_size_usd * keeper_bonus_rate)
+        gas_cost_usd = ((gas_limit * gas_price_gwei) / 1e9) * native_token_price_usd
+        net_profit_usd = round(gross_keeper_fee_usd - gas_cost_usd, 4)
+        would_execute = net_profit_usd >= self.min_net_profit_usd
+
+        return {
+            "strategy_id": "BOT_5_PERP_ORDER_KEEPER",
+            "strategy_type": "PERP_ORDER_AND_LIQ_KEEPER",
+            "status": "PROFITABLE_OPPORTUNITY_LOGGED" if would_execute else "SKIPPED_FEE_BELOW_THRESHOLD",
+            "would_execute_atomic": would_execute,
+            "chain": chain,
+            "protocol": protocol,
+            "order_id": order_id,
+            "order_type": otype_upper,
+            "direction": dir_upper,
+            "current_oracle_price_usd": round(current_oracle_price_usd, 4),
+            "trigger_price_usd": round(trigger_price_usd, 4),
+            "position_size_usd": round(position_size_usd, 2),
+            "gross_keeper_fee_usd": round(gross_keeper_fee_usd, 4),
+            "gas_cost_usd": round(gas_cost_usd, 4),
+            "net_profit_usd": net_profit_usd
+        }
+
+    # ==========================================================================
+    # COLA CENTRAL DE PRIORIDAD POR GANANCIA NETA (SIN COLISIÓN DE NONCE NI RAM)
+    # ==========================================================================
     @staticmethod
     def rank_unified_opportunities(opportunities: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
-        Central Profit Priority Queue:
-        Filters only executable profitable opportunities across all strategies
-        (Liquidations, DEX Arbitrage, Keeper Harvest/Kick) and orders them from highest
-        to lowest net_profit_usd so the single wallet nonce dispatches the highest earner first.
+        Central Profit Priority Queue across all 5 strategies:
+        Filters only executable profitable opportunities across Bots #1, #2, #3, #4, and #5,
+        and orders them from highest to lowest net_profit_usd.
         """
         executable = [
             opp for opp in opportunities

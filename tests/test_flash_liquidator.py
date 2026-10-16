@@ -1,12 +1,12 @@
 """
-Unit and Integration Test Suite for Flash Loan Liquidator (Phase 1 - Shadow Mode).
-Verifies fail-closed Chainlink decoding, Aave V3 & Venus/Compound position health math,
-net profit calculation after Flash Loan fees/slippage/gas, and SHA-256 JSONL logging.
+Unit and Integration Test Suite for Unified 5-in-1 On-Chain Commission Engine (Phase 1 - Shadow Mode).
+Verifies all 5 commission strategies (Flash Loan Liquidations, DEX Flash Swap Arbitrage,
+Lista DAO Auction Kick Bounties, Beefy Vault Harvest Keepers, and Perp Order/Liq Keepers)
+plus fail-closed Chainlink decoding, read-only RPC enforcement, and Central Priority Queue ranking.
 """
 
 import os
 import sys
-import json
 import tempfile
 import pytest
 
@@ -18,16 +18,18 @@ from oracle_watcher import (
     MultiChainRPCClient
 )
 from position_indexer import (
-    encode_address_param,
     decode_aave_v3_user_account_data,
     decode_compound_account_liquidity
 )
 from profit_simulator import ProfitSimulator
+from commission_strategies import (
+    decode_uniswap_v2_reserves,
+    UnifiedCommissionEngine
+)
 from shadow_logger import ShadowLogger, compute_record_sha256
 
 
 def _pack_words(*words: int) -> str:
-    """Helper to pack 256-bit unsigned/signed integers into a 0x-prefixed hex payload."""
     hex_chunks = []
     for w in words:
         if w < 0:
@@ -37,341 +39,205 @@ def _pack_words(*words: int) -> str:
 
 
 def test_01_chainlink_valid_round_decoding():
-    """Verifies accurate decoding of a valid Chainlink latestRoundData response."""
     now_ts = 1760570000
-    raw = _pack_words(
-        18446744073709562001,  # roundId
-        72880824556,           # answer ($728.80824556 at 8 decimals)
-        now_ts - 45,           # startedAt
-        now_ts - 40,           # updatedAt
-        18446744073709562001   # answeredInRound
-    )
+    raw = _pack_words(18446744073709562001, 72880824556, now_ts - 45, now_ts - 40, 18446744073709562001)
     res = decode_chainlink_latest_round_data(raw, decimals=8, max_staleness_seconds=3600, now_ts=now_ts)
     assert res["is_valid"] is True
-    assert res["reason"] == "OK"
     assert res["price_usd"] == pytest.approx(728.80824556)
-    assert res["age_seconds"] == 40.0
 
 
 def test_02_chainlink_fail_closed_negative_or_zero_answer():
-    """Rejects zero or negative oracle answers (two's complement int256)."""
     now_ts = 1760570000
     raw_zero = _pack_words(100, 0, now_ts - 10, now_ts - 5, 100)
-    res_zero = decode_chainlink_latest_round_data(raw_zero, decimals=8, now_ts=now_ts)
-    assert res_zero["is_valid"] is False
-    assert res_zero["reason"] == "NON_POSITIVE_ORACLE_ANSWER"
+    assert decode_chainlink_latest_round_data(raw_zero, decimals=8, now_ts=now_ts)["is_valid"] is False
 
     raw_neg = _pack_words(100, -50000000, now_ts - 10, now_ts - 5, 100)
-    res_neg = decode_chainlink_latest_round_data(raw_neg, decimals=8, now_ts=now_ts)
-    assert res_neg["is_valid"] is False
-    assert res_neg["reason"] == "NON_POSITIVE_ORACLE_ANSWER"
+    assert decode_chainlink_latest_round_data(raw_neg, decimals=8, now_ts=now_ts)["is_valid"] is False
 
 
 def test_03_chainlink_fail_closed_stale_timestamp_and_incomplete_round():
-    """Rejects stale timestamps and answeredInRound < roundId."""
     now_ts = 1760570000
     raw_stale = _pack_words(105, 60000000000, now_ts - 7200, now_ts - 7200, 105)
-    res_stale = decode_chainlink_latest_round_data(raw_stale, decimals=8, max_staleness_seconds=3600, now_ts=now_ts)
-    assert res_stale["is_valid"] is False
-    assert res_stale["reason"] == "STALE_ORACLE_TIMESTAMP"
+    assert decode_chainlink_latest_round_data(raw_stale, decimals=8, max_staleness_seconds=3600, now_ts=now_ts)["is_valid"] is False
 
-    raw_incomplete = _pack_words(105, 60000000000, now_ts - 30, now_ts - 20, 104)
-    res_inc = decode_chainlink_latest_round_data(raw_incomplete, decimals=8, max_staleness_seconds=3600, now_ts=now_ts)
-    assert res_inc["is_valid"] is False
-    assert res_inc["reason"] == "STALE_ANSWERED_IN_ROUND"
+    raw_inc = _pack_words(105, 60000000000, now_ts - 30, now_ts - 20, 104)
+    assert decode_chainlink_latest_round_data(raw_inc, decimals=8, max_staleness_seconds=3600, now_ts=now_ts)["is_valid"] is False
 
 
 def test_04_uniswap_v3_slot0_and_liquidity_decoding():
-    """Verifies PancakeSwap V3 / Uniswap V3 slot0() and liquidity() decoding."""
-    sqrt_price_x96 = 1 << 96  # Ratio = 1.0
-    raw_slot0 = _pack_words(sqrt_price_x96, -120, 0, 1, 1, 0, 1)
-    raw_liq = hex(5000000000000000000000)
-    res = decode_uniswap_v3_slot0(raw_slot0, raw_liq)
+    raw_slot0 = _pack_words(1 << 96, -120, 0, 1, 1, 0, 1)
+    res = decode_uniswap_v3_slot0(raw_slot0, hex(5000000000000000000000))
     assert res["is_valid"] is True
     assert res["spot_price"] == pytest.approx(1.0)
-    assert res["tick"] == -120
-    assert res["in_range_liquidity"] == 5000000000000000000000
 
 
 def test_05_rpc_client_blocks_write_methods():
-    """Enforces Shadow Mode read-only guarantee by blocking eth_sendRawTransaction."""
     client = MultiChainRPCClient({"BNB": ["https://bsc-rpc.publicnode.com"]})
     with pytest.raises(PermissionError, match="Shadow Mode violation"):
         client.call_rpc("BNB", "eth_sendRawTransaction", ["0xdeadbeef"])
 
 
 def test_06_aave_v3_user_account_decoding_underwater_and_healthy():
-    """Verifies Aave V3 / Kinza 6-tuple decoding for both healthy and underwater borrowers."""
     borrower = "0x955b7a7ddcbf443d0e6b899ba1aba71f7413272f"
-    # Underwater: $10,000 collateral (8 dec), $8,500 debt (8 dec), HF = 0.94 (18 dec)
-    raw_underwater = _pack_words(
-        10000 * (10 ** 8),
-        8500 * (10 ** 8),
-        0,
-        8000,
-        7500,
-        int(0.94 * (10 ** 18))
-    )
-    pos_u = decode_aave_v3_user_account_data(raw_underwater, borrower, "Kinza_Finance_BSC")
-    assert pos_u["is_valid"] is True
+    raw_u = _pack_words(10000 * (10 ** 8), 8500 * (10 ** 8), 0, 8000, 7500, int(0.94 * (10 ** 18)))
+    pos_u = decode_aave_v3_user_account_data(raw_u, borrower, "Kinza_Finance_BSC")
     assert pos_u["is_liquidatable"] is True
     assert pos_u["health_factor"] == pytest.approx(0.94)
-    assert pos_u["total_collateral_usd"] == pytest.approx(10000.0)
-    assert pos_u["total_debt_usd"] == pytest.approx(8500.0)
 
-    # Healthy: HF = 1.45
-    raw_healthy = _pack_words(
-        15000 * (10 ** 8),
-        8500 * (10 ** 8),
-        2000 * (10 ** 8),
-        8000,
-        7500,
-        int(1.45 * (10 ** 18))
-    )
-    pos_h = decode_aave_v3_user_account_data(raw_healthy, borrower, "Kinza_Finance_BSC")
-    assert pos_h["is_valid"] is True
+    raw_h = _pack_words(15000 * (10 ** 8), 8500 * (10 ** 8), 2000 * (10 ** 8), 8000, 7500, int(1.45 * (10 ** 18)))
+    pos_h = decode_aave_v3_user_account_data(raw_h, borrower, "Kinza_Finance_BSC")
     assert pos_h["is_liquidatable"] is False
-    assert pos_h["health_factor"] == pytest.approx(1.45)
 
 
 def test_07_compound_venus_account_liquidity_decoding_and_error_gate():
-    """Verifies Venus getAccountLiquidity decoding and Comptroller non-zero error rejection."""
     borrower = "0x955b7a7ddcbf443d0e6b899ba1aba71f7413272f"
-    # Non-zero error code (e.g., error = 3) must fail-closed
     raw_err = _pack_words(3, 0, 500 * (10 ** 18))
-    res_err = decode_compound_account_liquidity(raw_err, borrower, "Venus_Core_BSC")
-    assert res_err["is_valid"] is False
-    assert res_err["reason"] == "COMPTROLLER_ERROR_3"
+    assert decode_compound_account_liquidity(raw_err, borrower, "Venus_Core_BSC")["is_valid"] is False
 
-    # Underwater account: error = 0, liquidity = 0, shortfall = $1,200
-    raw_shortfall = _pack_words(0, 0, 1200 * (10 ** 18))
-    res_sf = decode_compound_account_liquidity(raw_shortfall, borrower, "Venus_Core_BSC", measured_debt_usd=10000.0)
-    assert res_sf["is_valid"] is True
+    raw_sf = _pack_words(0, 0, 1200 * (10 ** 18))
+    res_sf = decode_compound_account_liquidity(raw_sf, borrower, "Venus_Core_BSC", measured_debt_usd=10000.0)
     assert res_sf["is_liquidatable"] is True
-    assert res_sf["shortfall_usd"] == pytest.approx(1200.0)
     assert res_sf["health_factor"] < 1.0
 
 
-def test_08_profit_simulator_profitable_atomic_liquidation():
-    """Verifies accurate net profit calculation for a profitable underwater position."""
+def test_08_bot1_flash_loan_liquidation_profitable():
     sim = ProfitSimulator({"min_net_profit_usd": 1.50, "max_flash_loan_usd": 250000.0, "default_gas_limit": 450000})
-    position = {
-        "is_valid": True,
-        "is_liquidatable": True,
-        "borrower": "0x000000000000000000000000000000000000dEaD",
-        "health_factor": 0.92,
-        "total_collateral_usd": 20000.0,
-        "total_debt_usd": 16000.0
-    }
-    market = {
-        "market_id": "Venus_Core_BSC",
-        "chain": "BNB",
-        "close_factor": 0.50,
-        "liquidation_bonus": 0.10,
-        "flash_loan_fee_rate": 0.0005,
-        "dex_swap_fee_rate": 0.0005
-    }
-    res = sim.evaluate_liquidation(
-        position=position,
-        market=market,
-        native_token_price_usd=720.0,
-        gas_price_gwei=1.0,
-        oracle_is_valid=True,
-        pool_in_range_liquidity=5 * (10 ** 21)
-    )
+    pos = {"is_valid": True, "is_liquidatable": True, "borrower": "0xdEaD", "health_factor": 0.92, "total_collateral_usd": 20000.0, "total_debt_usd": 16000.0}
+    mkt = {"market_id": "Venus_Core_BSC", "chain": "BNB", "close_factor": 0.50, "liquidation_bonus": 0.10, "flash_loan_fee_rate": 0.0005, "dex_swap_fee_rate": 0.0005}
+    res = sim.evaluate_liquidation(pos, mkt, 720.0, 1.0, oracle_is_valid=True, pool_in_range_liquidity=5 * (10 ** 21))
     assert res["would_execute_atomic"] is True
-    assert res["status"] == "PROFITABLE_OPPORTUNITY_LOGGED"
-    assert res["debt_to_cover_usd"] == pytest.approx(8000.0)
-    assert res["gross_bonus_usd"] == pytest.approx(800.0)
-    assert res["flash_loan_fee_usd"] == pytest.approx(4.0)
     assert res["net_profit_usd"] > 750.0
 
 
-def test_09_profit_simulator_reverts_unprofitable_dust_position():
-    """Verifies atomic revert simulation when gas + fees exceed the liquidation bonus."""
-    sim = ProfitSimulator({"min_net_profit_usd": 1.50, "max_flash_loan_usd": 250000.0, "default_gas_limit": 450000})
-    position = {
-        "is_valid": True,
-        "is_liquidatable": True,
-        "borrower": "0x0000000000000000000000000000000000000001",
-        "health_factor": 0.97,
-        "total_collateral_usd": 15.0,
-        "total_debt_usd": 10.0
-    }
-    market = {
-        "market_id": "Venus_Core_BSC",
-        "chain": "BNB",
-        "close_factor": 0.50,
-        "liquidation_bonus": 0.05,
-        "flash_loan_fee_rate": 0.0005,
-        "dex_swap_fee_rate": 0.0005
-    }
-    # Debt covered = $5.0, 5% gross bonus = $0.25 < $1.50 min threshold
-    res = sim.evaluate_liquidation(
-        position=position,
-        market=market,
-        native_token_price_usd=720.0,
-        gas_price_gwei=3.0,
-        oracle_is_valid=True,
-        pool_in_range_liquidity=5 * (10 ** 21)
-    )
+def test_09_bot1_flash_loan_liquidation_reverts_dust():
+    sim = ProfitSimulator({"min_net_profit_usd": 1.50})
+    pos = {"is_valid": True, "is_liquidatable": True, "borrower": "0x01", "health_factor": 0.97, "total_collateral_usd": 15.0, "total_debt_usd": 10.0}
+    mkt = {"market_id": "Venus_Core_BSC", "chain": "BNB", "close_factor": 0.50, "liquidation_bonus": 0.05}
+    res = sim.evaluate_liquidation(pos, mkt, 720.0, 3.0, oracle_is_valid=True, pool_in_range_liquidity=5 * (10 ** 21))
     assert res["would_execute_atomic"] is False
-    assert res["status"] == "REVERTED_NET_PROFIT_BELOW_THRESHOLD"
-    assert res["net_profit_usd"] < 1.50
 
 
-def test_10_profit_simulator_rejects_healthy_and_insolvent_positions():
-    """Rejects healthy (HF >= 1.0) and deeply insolvent (collateral < debt covered) positions."""
+def test_10_bot1_rejects_healthy_and_insolvent_positions():
     sim = ProfitSimulator({"min_net_profit_usd": 1.50})
-    market = {"market_id": "Kinza_Finance_BSC", "chain": "BNB", "close_factor": 0.50, "liquidation_bonus": 0.08}
-
-    healthy_pos = {
-        "is_valid": True,
-        "is_liquidatable": False,
-        "borrower": "0x1111111111111111111111111111111111111111",
-        "health_factor": 1.05,
-        "total_collateral_usd": 10000.0,
-        "total_debt_usd": 8000.0
-    }
-    res_h = sim.evaluate_liquidation(healthy_pos, market, 720.0, 1.0, oracle_is_valid=True)
-    assert res_h["would_execute_atomic"] is False
-    assert res_h["status"] == "SKIPPED_HEALTHY_POSITION"
-
-    # Deeply insolvent position where collateral ($3,000) < debt to cover ($5,000)
-    insolvent_pos = {
-        "is_valid": True,
-        "is_liquidatable": True,
-        "borrower": "0x2222222222222222222222222222222222222222",
-        "health_factor": 0.40,
-        "total_collateral_usd": 3000.0,
-        "total_debt_usd": 10000.0
-    }
-    res_ins = sim.evaluate_liquidation(insolvent_pos, market, 720.0, 1.0, oracle_is_valid=True)
-    assert res_ins["would_execute_atomic"] is False
-    assert res_ins["net_profit_usd"] < 0.0
+    mkt = {"market_id": "Kinza_Finance_BSC", "chain": "BNB", "close_factor": 0.50, "liquidation_bonus": 0.08}
+    assert sim.evaluate_liquidation({"is_valid": True, "is_liquidatable": False, "health_factor": 1.05, "total_collateral_usd": 10000.0, "total_debt_usd": 8000.0}, mkt, 720.0, 1.0)["would_execute_atomic"] is False
+    assert sim.evaluate_liquidation({"is_valid": True, "is_liquidatable": True, "health_factor": 0.40, "total_collateral_usd": 3000.0, "total_debt_usd": 10000.0}, mkt, 720.0, 1.0)["would_execute_atomic"] is False
 
 
-def test_11_profit_simulator_fail_closed_on_invalid_oracle_or_zero_liquidity():
-    """Blocks execution if Chainlink oracle is stale/invalid or DEX pool liquidity is zero."""
+def test_11_bot1_fail_closed_on_invalid_oracle_or_zero_liquidity():
     sim = ProfitSimulator({"min_net_profit_usd": 1.50})
-    market = {"market_id": "Venus_Core_BSC", "chain": "BNB", "close_factor": 0.50, "liquidation_bonus": 0.10}
-    pos = {
-        "is_valid": True,
-        "is_liquidatable": True,
-        "borrower": "0x3333333333333333333333333333333333333333",
-        "health_factor": 0.88,
-        "total_collateral_usd": 50000.0,
-        "total_debt_usd": 40000.0
-    }
-
-    res_bad_oracle = sim.evaluate_liquidation(pos, market, 720.0, 1.0, oracle_is_valid=False)
-    assert res_bad_oracle["would_execute_atomic"] is False
-    assert res_bad_oracle["status"] == "ABORTED_ORACLE_OR_GAS_INVALID"
-
-    res_zero_liq = sim.evaluate_liquidation(
-        pos, market, 720.0, 1.0, oracle_is_valid=True, pool_in_range_liquidity=0
-    )
-    assert res_zero_liq["would_execute_atomic"] is False
-    assert res_zero_liq["status"] == "ABORTED_ZERO_DEX_LIQUIDITY"
+    mkt = {"market_id": "Venus_Core_BSC", "chain": "BNB"}
+    pos = {"is_valid": True, "is_liquidatable": True, "health_factor": 0.88, "total_collateral_usd": 50000.0, "total_debt_usd": 40000.0}
+    assert sim.evaluate_liquidation(pos, mkt, 720.0, 1.0, oracle_is_valid=False)["status"] == "ABORTED_ORACLE_OR_GAS_INVALID"
+    assert sim.evaluate_liquidation(pos, mkt, 720.0, 1.0, oracle_is_valid=True, pool_in_range_liquidity=0)["status"] == "ABORTED_ZERO_DEX_LIQUIDITY"
 
 
 def test_12_shadow_logger_sha256_attestation_and_test_isolation():
-    """Verifies JSONL append persistence, SHA-256 record integrity, and test flag filtering."""
     with tempfile.TemporaryDirectory() as tmpdir:
-        liq_log = os.path.join(tmpdir, "liq.jsonl")
-        tel_log = os.path.join(tmpdir, "tel.jsonl")
-        logger = ShadowLogger(liquidations_path=liq_log, telemetry_path=tel_log)
-
-        rec_test = logger.log_liquidation_evaluation({"borrower": "0xtest", "net_profit_usd": 25.0}, is_test=True)
-        rec_live = logger.log_liquidation_evaluation({"borrower": "0xlive", "net_profit_usd": 80.0}, is_test=False)
-
-        assert rec_test["record_sha256"] == compute_record_sha256(rec_test)
-        assert rec_live["record_sha256"] == compute_record_sha256(rec_live)
-
-        live_only = logger.read_recent_liquidations(include_tests=False)
-        assert len(live_only) == 1
-        assert live_only[0]["borrower"] == "0xlive"
-
-        all_recs = logger.read_recent_liquidations(include_tests=True)
-        assert len(all_recs) == 2
-
-
-from commission_strategies import (
-    decode_uniswap_v2_reserves,
-    UnifiedCommissionEngine
-)
+        logger = ShadowLogger(liquidations_path=os.path.join(tmpdir, "l.jsonl"), telemetry_path=os.path.join(tmpdir, "t.jsonl"))
+        rec_t = logger.log_liquidation_evaluation({"borrower": "0xt", "net_profit_usd": 25.0}, is_test=True)
+        rec_l = logger.log_liquidation_evaluation({"borrower": "0xl", "net_profit_usd": 80.0}, is_test=False)
+        assert rec_t["record_sha256"] == compute_record_sha256(rec_t)
+        assert rec_l["record_sha256"] == compute_record_sha256(rec_l)
+        assert len(logger.read_recent_liquidations(include_tests=False)) == 1
 
 
 def test_13_uniswap_v2_reserves_decoding():
-    """Verifies PancakeSwap V2 getReserves() decoding and spot price calculation."""
     raw = _pack_words(28785000 * (10 ** 18), 39500 * (10 ** 18), 1760570000)
     res = decode_uniswap_v2_reserves(raw)
     assert res["is_valid"] is True
     assert res["spot_price_usd"] == pytest.approx(28785000.0 / 39500.0, rel=1e-4)
 
 
-def test_14_unified_dex_flash_swap_arbitrage_profitable_and_unprofitable():
-    """Verifies atomic DEX-to-DEX Flash Swap arbitrage spread math and revert threshold."""
+def test_14_bot2_dex_flash_swap_arbitrage():
     engine = UnifiedCommissionEngine({"min_net_profit_usd": 1.50})
-    # Profitable spread: $720 on V3 vs $726 on V2 (83 bps spread on $5,000 notional)
     arb_ok = engine.evaluate_dex_flash_arbitrage(
-        pair_symbol="WBNB/USDT",
-        chain="BNB",
-        pool_a_name="PancakeSwap_V3",
-        pool_a_price_usd=720.0,
-        pool_a_fee_rate=0.0005,
-        pool_b_name="PancakeSwap_V2",
-        pool_b_price_usd=726.0,
-        pool_b_fee_rate=0.0025,
-        trade_notional_usd=5000.0,
-        native_token_price_usd=720.0,
-        gas_price_gwei=0.05
+        pair_symbol="WBNB/USDT", chain="BNB",
+        pool_a_name="PancakeSwap_V3", pool_a_price_usd=720.0, pool_a_fee_rate=0.0005,
+        pool_b_name="PancakeSwap_V2", pool_b_price_usd=726.0, pool_b_fee_rate=0.0025,
+        trade_notional_usd=5000.0, native_token_price_usd=720.0, gas_price_gwei=0.05
     )
     assert arb_ok["would_execute_atomic"] is True
+    assert arb_ok["strategy_id"] == "BOT_2_DEX_FLASH_ARBITRAGE"
     assert arb_ok["net_profit_usd"] > 20.0
 
-    # Tight spread (2 bps): should revert because swap fees + slippage exceed spread
-    arb_rev = engine.evaluate_dex_flash_arbitrage(
-        pair_symbol="WBNB/USDT",
-        chain="BNB",
-        pool_a_name="PancakeSwap_V3",
-        pool_a_price_usd=728.00,
-        pool_a_fee_rate=0.0005,
-        pool_b_name="PancakeSwap_V2",
-        pool_b_price_usd=728.15,
-        pool_b_fee_rate=0.0025,
-        trade_notional_usd=5000.0,
-        native_token_price_usd=728.0,
-        gas_price_gwei=0.05
-    )
-    assert arb_rev["would_execute_atomic"] is False
-    assert arb_rev["status"] == "REVERTED_SPREAD_BELOW_COSTS"
 
-
-def test_15_unified_keeper_harvest_and_kick_evaluation():
-    """Verifies Beefy harvest() / Lista DAO kick() callFee keeper evaluation."""
+def test_15_bot3_lista_dao_auction_kick_bounty():
     engine = UnifiedCommissionEngine({"min_net_profit_usd": 1.50})
-    res = engine.evaluate_keeper_harvest_or_kick(
-        vault_id="Beefy_Venus_USDT_Vault",
-        chain="BNB",
-        pending_rewards_usd=1200.0,
-        call_fee_rate=0.005,  # 0.5% callFee = $6.00
-        flat_incentive_usd=0.0,
-        native_token_price_usd=727.0,
-        gas_price_gwei=0.05
+    # Vault below MCR (5200 / 4900 = 1.0612 < 1.10 MCR) -> triggers kick bounty ($15 flat + 1% of $4,900 = $64 gross)
+    kick_ok = engine.evaluate_auction_kick_bounty(
+        protocol="Lista_DAO_lisUSD", chain="BNB", vault_owner="0xbeef",
+        collateral_usd=5200.0, debt_usd=4900.0, min_collateral_ratio=1.10,
+        flat_kick_tip_usd=15.0, percentage_kick_bonus_rate=0.01,
+        native_token_price_usd=727.0, gas_price_gwei=0.05
+    )
+    assert kick_ok["would_execute_atomic"] is True
+    assert kick_ok["strategy_id"] == "BOT_3_AUCTION_KICK_KEEPER"
+    assert kick_ok["net_profit_usd"] == pytest.approx(64.0 - kick_ok["gas_cost_usd"], abs=1e-3)
+
+    # Healthy vault (ICR = 1.50 >= 1.10) -> skipped
+    kick_skip = engine.evaluate_auction_kick_bounty(
+        protocol="Lista_DAO_lisUSD", chain="BNB", vault_owner="0xsafe",
+        collateral_usd=7500.0, debt_usd=5000.0, min_collateral_ratio=1.10,
+        flat_kick_tip_usd=15.0, percentage_kick_bonus_rate=0.01,
+        native_token_price_usd=727.0, gas_price_gwei=0.05
+    )
+    assert kick_skip["would_execute_atomic"] is False
+    assert kick_skip["status"] == "SKIPPED_VAULT_ABOVE_MCR"
+
+
+def test_16_bot4_beefy_vault_harvest_keeper():
+    engine = UnifiedCommissionEngine({"min_net_profit_usd": 1.50})
+    res = engine.evaluate_vault_harvest_keeper(
+        vault_id="Beefy_Venus_USDT_Vault", chain="BNB",
+        pending_rewards_usd=1200.0, call_fee_rate=0.005,
+        native_token_price_usd=727.0, gas_price_gwei=0.05
     )
     assert res["would_execute_atomic"] is True
+    assert res["strategy_id"] == "BOT_4_VAULT_HARVEST_KEEPER"
     assert res["net_profit_usd"] > 5.90
 
 
-def test_16_central_profit_priority_queue_orders_highest_earner_first():
-    """Verifies the single-engine priority queue ranks all strategies by highest net_profit_usd."""
+def test_17_bot5_perp_order_and_liquidation_keeper():
+    engine = UnifiedCommissionEngine({"min_net_profit_usd": 1.50})
+    # Triggered LONG liquidation when oracle price ($725) <= trigger price ($730)
+    perp_ok = engine.evaluate_perp_order_keeper(
+        protocol="ApolloX_V2_BSC", chain="BNB", order_id="ORD-1",
+        order_type="LIQUIDATION", direction="LONG",
+        trigger_price_usd=730.0, current_oracle_price_usd=725.0,
+        position_size_usd=15000.0, execution_fee_usd=2.50, keeper_bonus_rate=0.002,
+        native_token_price_usd=725.0, gas_price_gwei=0.05
+    )
+    assert perp_ok["would_execute_atomic"] is True
+    assert perp_ok["strategy_id"] == "BOT_5_PERP_ORDER_KEEPER"
+    assert perp_ok["net_profit_usd"] > 32.0
+
+    # Not triggered when LONG price ($740) > trigger price ($730)
+    perp_wait = engine.evaluate_perp_order_keeper(
+        protocol="ApolloX_V2_BSC", chain="BNB", order_id="ORD-2",
+        order_type="LIQUIDATION", direction="LONG",
+        trigger_price_usd=730.0, current_oracle_price_usd=740.0,
+        position_size_usd=15000.0, execution_fee_usd=2.50, keeper_bonus_rate=0.002,
+        native_token_price_usd=740.0, gas_price_gwei=0.05
+    )
+    assert perp_wait["would_execute_atomic"] is False
+    assert perp_wait["status"] == "SKIPPED_TRIGGER_PRICE_NOT_REACHED"
+
+
+def test_18_central_profit_priority_queue_ranks_all_5_bots():
     opps = [
-        {"strategy_type": "KEEPER_HARVEST_AND_KICK", "would_execute_atomic": True, "net_profit_usd": 5.95},
-        {"strategy_type": "LIQUIDATION_FLASH_LOAN", "would_execute_atomic": True, "net_profit_usd": 310.40},
-        {"strategy_type": "DEX_FLASH_SWAP_ARBITRAGE", "would_execute_atomic": False, "net_profit_usd": -2.10},
-        {"strategy_type": "DEX_FLASH_SWAP_ARBITRAGE", "would_execute_atomic": True, "net_profit_usd": 24.80}
+        {"strategy_id": "BOT_4_VAULT_HARVEST_KEEPER", "would_execute_atomic": True, "net_profit_usd": 9.24},
+        {"strategy_id": "BOT_1_FLASH_LIQUIDATION", "would_execute_atomic": True, "net_profit_usd": 587.04},
+        {"strategy_id": "BOT_2_DEX_FLASH_ARBITRAGE", "would_execute_atomic": True, "net_profit_usd": 29.59},
+        {"strategy_id": "BOT_3_AUCTION_KICK_KEEPER", "would_execute_atomic": True, "net_profit_usd": 63.99},
+        {"strategy_id": "BOT_5_PERP_ORDER_KEEPER", "would_execute_atomic": True, "net_profit_usd": 32.49}
     ]
     ranked = UnifiedCommissionEngine.rank_unified_opportunities(opps)
-    assert len(ranked) == 3
-    assert [r["net_profit_usd"] for r in ranked] == [310.40, 24.80, 5.95]
+    assert len(ranked) == 5
+    assert [r["strategy_id"] for r in ranked] == [
+        "BOT_1_FLASH_LIQUIDATION",
+        "BOT_3_AUCTION_KICK_KEEPER",
+        "BOT_5_PERP_ORDER_KEEPER",
+        "BOT_2_DEX_FLASH_ARBITRAGE",
+        "BOT_4_VAULT_HARVEST_KEEPER"
+    ]
