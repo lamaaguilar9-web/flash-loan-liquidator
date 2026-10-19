@@ -102,6 +102,70 @@ def decode_aave_v3_user_account_data(raw_hex: str, borrower: str, market_id: str
     }
 
 
+def decode_vtoken_borrow_balance_stored(
+    raw_hex: str,
+    underlying_decimals: int = 18
+) -> Dict[str, Any]:
+    """
+    Decodes Compound V2 / Venus vToken.borrowBalanceStored(address) -> uint256 (in underlying units).
+
+    Documented On-Chain ABI Layouts on BNB Chain (verified at block ~128601311 on borrower
+    0x955b7a7ddcbf443d0e6b899ba1aba71f7413272f):
+      1. Direct vToken contract (e.g., vBNB 0xA07c5b74C9B40447a954e1466938b865b6BBea36):
+         Returns 32 bytes (0x + 64 hex chars): word0 = uint256 borrowBalance in underlying wei.
+      2. VBep20Delegator proxy vTokens (vUSDT 0xfD5840Cd36d94D7229439859C0112a4185BC0255, vUSDC, vBTC, vETH):
+         Solidity 0.5.16 delegateToViewImplementation copies returndatasize (96 bytes = 0x + 192 hex chars)
+         from the internal (bytes memory) return buffer starting at add(returnData, 0x20):
+           - word0 [0:64]   = uint256 borrowBalance in underlying token units (e.g. 0x16e91bfb08b9c1c0f7fa = 108,219.0562 USDT, 18 dec)
+           - word1 [64:128] = 0x0000...0000 (must be strictly 0)
+           - word2 [128:192]= 0x0000...0000 (must be strictly 0)
+         Confirmed via getAccountSnapshot(address) (0xc37f68e2) word2 == 108,192.17 USDT and
+         Comptroller.getAccountLiquidity(address) excess liquidity == $129,964.84 USD
+         (3.63663 BTCB collateral * $81,864.11 * 0.80 CF - $108,192.17 USDT debt = $129,975.63 USD).
+
+    Any other payload length or non-zero trailing words is rejected fail-closed with MALFORMED_BORROW_RESPONSE.
+    """
+    if not raw_hex or not isinstance(raw_hex, str) or not raw_hex.startswith("0x"):
+        return {
+            "is_valid": False,
+            "reason": "MALFORMED_BORROW_RESPONSE",
+            "borrow_amount": 0.0
+        }
+
+    payload = raw_hex[2:]
+    if len(payload) not in (64, 192):
+        return {
+            "is_valid": False,
+            "reason": "MALFORMED_BORROW_RESPONSE",
+            "borrow_amount": 0.0
+        }
+
+    try:
+        word0 = int(payload[0:64], 16)
+        if len(payload) == 192:
+            word1 = int(payload[64:128], 16)
+            word2 = int(payload[128:192], 16)
+            if word1 != 0 or word2 != 0:
+                return {
+                    "is_valid": False,
+                    "reason": "MALFORMED_BORROW_RESPONSE",
+                    "borrow_amount": 0.0
+                }
+    except ValueError:
+        return {
+            "is_valid": False,
+            "reason": "MALFORMED_BORROW_RESPONSE",
+            "borrow_amount": 0.0
+        }
+
+    return {
+        "is_valid": True,
+        "reason": "OK",
+        "raw_word0": word0,
+        "borrow_amount": round(word0 / float(10 ** underlying_decimals), 6)
+    }
+
+
 def decode_compound_account_liquidity(
     raw_hex: str,
     borrower: str,
@@ -155,6 +219,21 @@ def decode_compound_account_liquidity(
 
     liquidity_usd = round(liquidity_raw / 1e18, 4)
     shortfall_usd = round(shortfall_raw / 1e18, 4)
+
+    # Fail-closed coherence gate (ALTA-2): measured debt cannot exceed 10x Comptroller state
+    max_coherent_debt_usd = 10.0 * (liquidity_usd + shortfall_usd + 1.0)
+    if measured_debt_usd < 0.0 or measured_debt_usd > max_coherent_debt_usd:
+        return {
+            "is_valid": False,
+            "reason": "DEBT_MEASUREMENT_INCOHERENTE",
+            "borrower": borrower,
+            "market_id": market_id,
+            "measured_debt_usd": measured_debt_usd,
+            "liquidity_excess_usd": liquidity_usd,
+            "shortfall_usd": shortfall_usd,
+            "health_factor": None,
+            "is_liquidatable": False
+        }
 
     if shortfall_usd > 0.0:
         # Underwater position: shortfall > 0 implies Health Factor < 1.0
@@ -278,7 +357,7 @@ class PositionIndexer:
 
         if arch == "compound_v2":
             raw_liq = self.rpc.eth_call(chain, controller, SELECTOR_GET_ACCOUNT_LIQUIDITY + padded_addr)
-            # Sum borrowBalanceStored across all configured vTokens using per-token decimals & live Chainlink prices
+            # Sum borrowBalanceStored across all configured vTokens using strict word0 parsing & live Chainlink prices
             measured_debt_usd = 0.0
             vtokens_meta = market.get("vtokens_meta")
             if isinstance(vtokens_meta, list) and vtokens_meta:
@@ -286,24 +365,36 @@ class PositionIndexer:
                     vt_addr = vt.get("address")
                     decimals = int(vt.get("underlying_decimals", 18))
                     feed_key = vt.get("oracle_feed", "USDT_USD")
-                    token_price = (oracle_prices or {}).get(feed_key, float(vt.get("fallback_price_usd", 1.0)))
+                    token_price = (oracle_prices or {}).get(feed_key)
+                    if token_price is None:
+                        continue
                     raw_borrow = self.rpc.eth_call(chain, vt_addr, SELECTOR_BORROW_BALANCE_STORED + padded_addr)
-                    if raw_borrow and raw_borrow.startswith("0x") and len(raw_borrow) > 2:
-                        try:
-                            token_amount = int(raw_borrow, 16) / (10 ** decimals)
-                            measured_debt_usd += token_amount * float(token_price)
-                        except ValueError:
-                            continue
+                    if raw_borrow is not None:
+                        dec = decode_vtoken_borrow_balance_stored(raw_borrow, decimals)
+                        if not dec["is_valid"]:
+                            return {
+                                "is_valid": False,
+                                "reason": dec["reason"],
+                                "borrower": borrower,
+                                "market_id": market_id,
+                                "vtoken": vt.get("symbol", vt_addr)
+                            }
+                        measured_debt_usd += dec["borrow_amount"] * float(token_price)
                 measured_debt_usd = round(measured_debt_usd, 4)
             else:
                 vtokens = market.get("vtokens", [])
                 if vtokens:
                     raw_borrow = self.rpc.eth_call(chain, vtokens[0], SELECTOR_BORROW_BALANCE_STORED + padded_addr)
-                    if raw_borrow and raw_borrow.startswith("0x") and len(raw_borrow) > 2:
-                        try:
-                            measured_debt_usd = round(int(raw_borrow, 16) / 1e18, 4)
-                        except ValueError:
-                            measured_debt_usd = 0.0
+                    if raw_borrow is not None:
+                        dec = decode_vtoken_borrow_balance_stored(raw_borrow, 18)
+                        if not dec["is_valid"]:
+                            return {
+                                "is_valid": False,
+                                "reason": dec["reason"],
+                                "borrower": borrower,
+                                "market_id": market_id
+                            }
+                        measured_debt_usd = round(dec["borrow_amount"], 4)
             return decode_compound_account_liquidity(raw_liq or "", borrower, market_id, measured_debt_usd)
 
         return {

@@ -15,11 +15,13 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from oracle_watcher import (
     decode_chainlink_latest_round_data,
     decode_uniswap_v3_slot0,
-    MultiChainRPCClient
+    MultiChainRPCClient,
+    WriteMethodForbiddenError
 )
 from position_indexer import (
     decode_aave_v3_user_account_data,
-    decode_compound_account_liquidity
+    decode_compound_account_liquidity,
+    decode_vtoken_borrow_balance_stored
 )
 from profit_simulator import ProfitSimulator
 from commission_strategies import (
@@ -98,6 +100,47 @@ def test_07_compound_venus_account_liquidity_decoding_and_error_gate():
     res_sf = decode_compound_account_liquidity(raw_sf, borrower, "Venus_Core_BSC", measured_debt_usd=10000.0)
     assert res_sf["is_liquidatable"] is True
     assert res_sf["health_factor"] < 1.0
+
+    # ALTA-2 regression: real 96-byte (194-char) VBep20Delegator response from vUSDT on BSC block ~128601311
+    real_vusdt_96b = (
+        "0x0000000000000000000000000000000000000000000016e91bfb08b9c1c0f7fa"
+        "0000000000000000000000000000000000000000000000000000000000000000"
+        "0000000000000000000000000000000000000000000000000000000000000000"
+    )
+    dec_96 = decode_vtoken_borrow_balance_stored(real_vusdt_96b, underlying_decimals=18)
+    assert dec_96["is_valid"] is True
+    assert dec_96["borrow_amount"] == pytest.approx(108192.170207, rel=1e-6)
+    assert dec_96["borrow_amount"] < 1e7  # Never 1e159
+
+    # Real Comptroller response for 0x955b7a7ddcbf443d0e6b899ba1aba71f7413272f ($129,964.84 excess liquidity)
+    real_comptroller_hex = (
+        "0x0000000000000000000000000000000000000000000000000000000000000000"
+        "000000000000000000000000000000000000000000001b85fbfd4b787603bffe"
+        "0000000000000000000000000000000000000000000000000000000000000000"
+    )
+    debt_usd = round(dec_96["borrow_amount"] * 0.99885, 4)
+    pos_real = decode_compound_account_liquidity(real_comptroller_hex, borrower, "Venus_Core_BSC", measured_debt_usd=debt_usd)
+    assert pos_real["is_valid"] is True
+    assert pos_real["total_debt_usd"] == pytest.approx(108067.7492, rel=1e-4)
+    assert pos_real["liquidity_excess_usd"] == pytest.approx(129964.8415, rel=1e-4)
+    assert pos_real["health_factor"] == pytest.approx(2.202633, rel=1e-4)
+
+    # ALTA-2 regression: normal 66-char (32-byte) response (e.g. vBNB)
+    raw_32b = "0x" + hex(25 * (10 ** 18))[2:].zfill(64)
+    dec_32 = decode_vtoken_borrow_balance_stored(raw_32b, underlying_decimals=18)
+    assert dec_32["is_valid"] is True
+    assert dec_32["borrow_amount"] == pytest.approx(25.0)
+
+    # ALTA-2 regression: malformed length (e.g. 2 words = 128 hex chars) or non-zero trailing words -> fail-closed
+    assert decode_vtoken_borrow_balance_stored("0x" + "0" * 128)["is_valid"] is False
+    assert decode_vtoken_borrow_balance_stored("0x" + "0" * 128)["reason"] == "MALFORMED_BORROW_RESPONSE"
+    bad_96b = "0x" + ("0" * 63 + "1") + ("0" * 63 + "1") + ("0" * 64)
+    assert decode_vtoken_borrow_balance_stored(bad_96b)["is_valid"] is False
+
+    # ALTA-2 regression: coherence gate blocks astronomical/incoherent debt (e.g. 1.4489e159)
+    incoherent = decode_compound_account_liquidity(real_comptroller_hex, borrower, "Venus_Core_BSC", measured_debt_usd=1.4489e159)
+    assert incoherent["is_valid"] is False
+    assert incoherent["reason"] == "DEBT_MEASUREMENT_INCOHERENTE"
 
 
 def test_08_bot1_flash_loan_liquidation_profitable():
