@@ -386,22 +386,27 @@ def print_console_report(summary: Dict[str, Any]) -> None:
                 f"    #{idx} [{ev.get('strategy_id'):<28}] | Gas=${ev.get('gas_cost_usd'):<7} | "
                 f"PnL Ficticio=${ev.get('net_profit_usd'):<9} -> [SIMULACIÓN DE ESTRÉS #{idx}]"
             )
-    print("=" * 84)
+    print("=" * 84, flush=True)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Sentinel Fleet 5-in-1 On-Chain Commission Engine - Shadow Mode")
     parser.add_argument("--chains", nargs="+", default=["BNB", "ARBITRUM"], help="Chains to scan (BNB ARBITRUM)")
-    parser.add_argument("--cycles", type=int, default=1, help="Number of scan cycles to run")
+    parser.add_argument("--cycles", type=int, default=1, help="Number of scan cycles to run (0 for continuous daemon)")
     parser.add_argument("--interval", type=int, default=15, help="Seconds between scan cycles")
     parser.add_argument("--simulate-stress", action="store_true", help="Evaluate all 5 bots using live network gas & Chainlink prices")
     args = parser.parse_args()
 
     scanner = FlashLoanShadowScanner()
-    for i in range(args.cycles):
-        summary = scanner.run_scan_cycle(chains=args.chains, simulate_stress=args.simulate_stress)
-        print_console_report(summary)
-        if i + 1 < args.cycles:
+    cycle_idx = 0
+    while args.cycles == 0 or cycle_idx < args.cycles:
+        cycle_idx += 1
+        try:
+            summary = scanner.run_scan_cycle(chains=args.chains, simulate_stress=args.simulate_stress)
+            print_console_report(summary)
+        except Exception as exc:
+            logger.error(f"Cycle #{cycle_idx} error: {exc}")
+        if args.cycles == 0 or cycle_idx < args.cycles:
             time.sleep(args.interval)
 
 

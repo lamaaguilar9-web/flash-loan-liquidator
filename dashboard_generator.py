@@ -10,7 +10,7 @@ import os
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 
-DEFAULT_DESKTOP_DASHBOARD = r"C:\Users\luis\Desktop\TABLERO_MOTOR_5_EN_1.html"
+DEFAULT_DESKTOP_DASHBOARD = r"C:\Users\luis\Desktop\TABLERO_MOTOR_5_EN_1.html" if os.name == "nt" else None
 DEFAULT_LOCAL_DASHBOARD = os.path.join(os.path.dirname(__file__), "data", "dashboard_live.html")
 
 
