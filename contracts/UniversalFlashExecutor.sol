@@ -271,10 +271,16 @@ contract UniversalFlashExecutor {
 
         delete _callbackContext;
 
-        // Sweep all remaining borrowedToken profit to owner (maintaining $0.00 custodial balance)
+        // Sweep all remaining borrowedToken and collateralToken to owner (maintaining $0.00 custodial balance)
         uint256 contractResidual = IERC20(order.borrowedToken).balanceOf(address(this));
         if (contractResidual > 0) {
             _safeTransfer(order.borrowedToken, owner, contractResidual);
+        }
+        if (order.collateralToken != address(0) && order.collateralToken != order.borrowedToken) {
+            uint256 collateralResidual = IERC20(order.collateralToken).balanceOf(address(this));
+            if (collateralResidual > 0) {
+                _safeTransfer(order.collateralToken, owner, collateralResidual);
+            }
         }
 
         uint256 ownerBalanceAfter = IERC20(order.borrowedToken).balanceOf(owner);

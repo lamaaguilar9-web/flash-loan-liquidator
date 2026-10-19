@@ -154,6 +154,10 @@ def decode_uniswap_v3_slot0(raw_slot0_hex: str, raw_liquidity_hex: Optional[str]
     }
 
 
+class WriteMethodForbiddenError(PermissionError):
+    """Raised when a state-changing JSON-RPC method is attempted in Shadow Mode."""
+
+
 class MultiChainRPCClient:
     """Failover JSON-RPC client strictly confined to read-only calls."""
     ALLOWED_METHODS = {
@@ -173,7 +177,7 @@ class MultiChainRPCClient:
     def call_rpc(self, chain: str, method: str, params: list) -> Tuple[Optional[Any], float, Optional[str]]:
         """Executes a read-only JSON-RPC call with automatic endpoint failover."""
         if method not in self.ALLOWED_METHODS:
-            raise PermissionError(f"Shadow Mode violation: RPC method '{method}' is prohibited.")
+            raise WriteMethodForbiddenError(f"Shadow Mode violation: RPC method '{method}' is prohibited.")
 
         urls = self.rpc_endpoints.get(chain, [])
         for url in urls:

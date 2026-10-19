@@ -324,13 +324,14 @@ def test_24_telegram_notifier_formatting_and_cooldown():
 
 
 def test_25_live_html_dashboard_rendering():
-    """Verifies the live HTML dashboard renders all 5 bots, Chainlink feeds, and DEX spreads."""
+    """Verifies the live HTML dashboard renders all 5 bots, Chainlink feeds, DEX spreads, and explicit SIMULACIÓN DE ESTRÉS tags."""
     summary = {
         "chains": {"BNB": {"block_number": 127899882, "gas_price_gwei": 0.05, "rpc_latency_ms": 180.0}},
         "oracles": {"BNB": {"BNB_USD": {"is_valid": True, "price_usd": 728.74, "round_id": "5534", "age_seconds": 12.0}}},
         "live_dex_arb_check": {"spread_bps": 12.83, "buy_price_usd": 728.45, "sell_price_usd": 729.39},
         "positions_scanned_count": 13,
         "watchlist_count": 1,
+        "live_priority_queue": [],
         "stress_priority_queue": [
             {"strategy_id": "BOT_1_FLASH_LIQUIDATION", "chain": "BNB", "gas_cost_usd": 0.0164, "net_profit_usd": 587.04}
         ]
@@ -338,5 +339,7 @@ def test_25_live_html_dashboard_rendering():
     html = render_dashboard_html(summary, telegram_configured=True)
     assert "MOTOR ÚNICO 5-EN-1 DE COMISIONES ON-CHAIN" in html
     assert "BOT_1_FLASH_LIQUIDATION" in html
-    assert "+$587.0400 USD" in html
+    assert "+$587.0400 USD (Ficticio)" in html
+    assert "SIMULACIÓN DE ESTRÉS #1" in html
+    assert "0 oportunidades con ganancia neta positiva en este bloque" in html
     assert "CONECTADO (@Luis_sentinel_alert_bot)" in html

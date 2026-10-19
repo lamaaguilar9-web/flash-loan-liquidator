@@ -163,6 +163,11 @@ class FlashLoanShadowScanner:
             gas_price_gwei = c_state.get("gas_price_gwei")
 
             chain_oracles = oracle_snapshots.get(chain, {})
+            oracle_price_map = {
+                k: float(v["price_usd"])
+                for k, v in chain_oracles.items()
+                if v.get("is_valid") and v.get("price_usd") is not None
+            }
             native_feed_key = "BNB_USD" if chain == "BNB" else "ETH_USD"
             native_feed = chain_oracles.get(native_feed_key, {})
             oracle_valid = bool(native_feed.get("is_valid", False))
@@ -170,7 +175,7 @@ class FlashLoanShadowScanner:
 
             borrowers = self.position_indexer.discover_recent_borrowers(market, latest_block, max_candidates=6)
             for borrower in borrowers:
-                pos = self.position_indexer.evaluate_borrower(market, borrower)
+                pos = self.position_indexer.evaluate_borrower(market, borrower, oracle_prices=oracle_price_map)
                 pos["chain"] = chain
                 pos["block_number"] = latest_block
                 scanned_positions.append(pos)
@@ -363,14 +368,23 @@ def print_console_report(summary: Dict[str, Any]) -> None:
     if b5:
         print(f"[*] Bot #5 Perpetuos GMX Arbitrum en Vivo ({b5.get('vault_address')}): WETH MaxPrice=${b5.get('live_weth_max_price_usd')} [{b5.get('status')}]")
 
+    live_q = summary.get("live_priority_queue", [])
+    print("-" * 84)
+    print(f"[*] Cola Central de Prioridad EN VIVO (Oportunidades Reales Detectadas): {len(live_q)}")
+    for idx, ev in enumerate(live_q, 1):
+        print(
+            f"    #{idx} [{ev.get('strategy_id'):<28}] | Gas=${ev.get('gas_cost_usd'):<7} | "
+            f"PnL Neto=${ev.get('net_profit_usd'):<9} -> [OPORTUNIDAD REAL #{idx}]"
+        )
+
     stress_q = summary.get("stress_priority_queue", [])
     if stress_q:
         print("-" * 84)
-        print("[*] Cola Central de Prioridad (5 Funciones Evaluadas en 1 Solo Motor con Gas/Oráculos Reales):")
+        print("[*] Banco de Prueba Matemática [SIMULACIÓN DE ESTRÉS — DATOS SINTÉTICOS, NO REAL]:")
         for idx, ev in enumerate(stress_q, 1):
             print(
                 f"    #{idx} [{ev.get('strategy_id'):<28}] | Gas=${ev.get('gas_cost_usd'):<7} | "
-                f"PnL Neto=${ev.get('net_profit_usd'):<9} -> [DISPARAR EN ORDEN #{idx}]"
+                f"PnL Ficticio=${ev.get('net_profit_usd'):<9} -> [SIMULACIÓN DE ESTRÉS #{idx}]"
             )
     print("=" * 84)
 

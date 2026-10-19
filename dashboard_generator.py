@@ -20,7 +20,8 @@ def render_dashboard_html(summary: Dict[str, Any], telegram_configured: bool = F
     chains = summary.get("chains", {})
     oracles = summary.get("oracles", {})
     arb = summary.get("live_dex_arb_check") or {}
-    queue = summary.get("stress_priority_queue") or summary.get("live_priority_queue") or []
+    live_queue = summary.get("live_priority_queue") or []
+    stress_queue = summary.get("stress_priority_queue") or []
 
     chain_rows = ""
     for cname, cdata in chains.items():
@@ -66,20 +67,64 @@ def render_dashboard_html(summary: Dict[str, Any], telegram_configured: bool = F
         "BOT_5_PERP_ORDER_KEEPER": "Keeper Órdenes Límite y Perpetuos (ApolloX / GMX)"
     }
 
-    queue_rows = ""
-    for idx, item in enumerate(queue, 1):
-        sid = item.get("strategy_id", "BOT")
-        desc = bot_descriptions.get(sid, sid)
-        queue_rows += f"""
+    live_queue_rows = ""
+    if live_queue:
+        for idx, item in enumerate(live_queue, 1):
+            sid = item.get("strategy_id", "BOT")
+            desc = bot_descriptions.get(sid, sid)
+            live_queue_rows += f"""
+            <tr>
+                <td><strong>#{idx}</strong></td>
+                <td><code>{sid}</code></td>
+                <td>{desc}</td>
+                <td>{item.get('chain', 'BNB')}</td>
+                <td>${item.get('gas_cost_usd', 0.0):.4f}</td>
+                <td class="profit">+${item.get('net_profit_usd', 0.0):.4f} USD</td>
+                <td><span class="badge ok">OPORTUNIDAD EN VIVO #{idx}</span></td>
+            </tr>
+            """
+    else:
+        live_queue_rows = """
         <tr>
-            <td><strong>#{idx}</strong></td>
-            <td><code>{sid}</code></td>
-            <td>{desc}</td>
-            <td>{item.get('chain', 'BNB')}</td>
-            <td>${item.get('gas_cost_usd', 0.0):.4f}</td>
-            <td class="profit">+${item.get('net_profit_usd', 0.0):.4f} USD</td>
-            <td><span class="badge ok">LISTO EN COLA #{idx}</span></td>
+            <td colspan="7" style="color:#94a3b8;text-align:center;">
+                0 oportunidades con ganancia neta positiva en este bloque — Vigilando en vivo (las operaciones bajo costo de gas/comisión se descartan automáticamente).
+            </td>
         </tr>
+        """
+
+    stress_section_html = ""
+    if stress_queue:
+        stress_rows = ""
+        for idx, item in enumerate(stress_queue, 1):
+            sid = item.get("strategy_id", "BOT")
+            desc = bot_descriptions.get(sid, sid)
+            stress_rows += f"""
+            <tr>
+                <td><strong>#{idx}</strong></td>
+                <td><code>{sid}</code></td>
+                <td>{desc} (Escenario Sintético)</td>
+                <td>{item.get('chain', 'BNB')}</td>
+                <td>${item.get('gas_cost_usd', 0.0):.4f}</td>
+                <td style="color:#fbbf24;font-weight:700;">+${item.get('net_profit_usd', 0.0):.4f} USD (Ficticio)</td>
+                <td><span class="badge warn">SIMULACIÓN DE ESTRÉS #{idx}</span></td>
+            </tr>
+            """
+        stress_section_html = f"""
+        <h2>2B. Banco de Prueba Matemática (SIMULACIÓN DE ESTRÉS — DATOS SINTÉTICOS, NO EJECUCIÓN REAL)</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Orden</th>
+                    <th>ID Bot</th>
+                    <th>Escenario de Prueba</th>
+                    <th>Red</th>
+                    <th>Gas Real USD</th>
+                    <th>PnL Hipotético de Prueba</th>
+                    <th>Etiqueta de Honestidad</th>
+                </tr>
+            </thead>
+            <tbody>{stress_rows}</tbody>
+        </table>
         """
 
     tg_badge = (
@@ -89,13 +134,18 @@ def render_dashboard_html(summary: Dict[str, Any], telegram_configured: bool = F
     )
 
     keeper_telemetry = summary.get("live_keeper_telemetry") or {}
-    lista_info = keeper_telemetry.get("bot3_lista_dao") or {}
-    beefy_list = keeper_telemetry.get("bot4_beefy_vaults") or []
-    gmx_info = keeper_telemetry.get("bot5_gmx_arbitrum") or {}
+    lista_info = summary.get("live_bot3_lista") or keeper_telemetry.get("bot3_lista_dao") or {}
+    beefy_list = summary.get("live_bot4_beefy") or keeper_telemetry.get("bot4_beefy_vaults") or []
+    gmx_info = summary.get("live_bot5_gmx") or keeper_telemetry.get("bot5_gmx_arbitrum") or {}
     beefy_summary = ", ".join(
-        f"{v.get('name')}: {v.get('balance_lp')} LP ({v.get('call_fee_bps')} bps)"
+        f"{v.get('vault_id') or v.get('name')}: {v.get('live_lp_balance') or v.get('balance_lp')} LP ({v.get('call_fee_bps')} bps)"
         for v in beefy_list
     ) or "Sincronizando..."
+
+    lisusd_contract = lista_info.get("token_address") or lista_info.get("contract") or "0x0782...41E5"
+    lisusd_supply = lista_info.get("live_lisusd_supply") or lista_info.get("lisusd_supply") or 0.0
+    gmx_vault = gmx_info.get("vault_address") or gmx_info.get("vault") or "0x489e...97C4A"
+    gmx_weth_price = gmx_info.get("live_weth_max_price_usd") or gmx_info.get("weth_max_price_usd") or 0.0
 
     live_bots_rows = f"""
         <tr>
@@ -115,8 +165,8 @@ def render_dashboard_html(summary: Dict[str, Any], telegram_configured: bool = F
         <tr>
             <td><code>BOT_3_AUCTION_KICK_KEEPER</code></td>
             <td>BNB Chain</td>
-            <td>Lista DAO lisUSD (<code>{lista_info.get('contract', '0x0782...41E5')}</code>)</td>
-            <td>Suministro activo: {lista_info.get('lisusd_supply', 0):,.2f} lisUSD</td>
+            <td>Lista DAO lisUSD (<code>{lisusd_contract}</code>)</td>
+            <td>Suministro activo: {lisusd_supply:,.2f} lisUSD</td>
             <td><span class="badge ok">CONECTADO EN VIVO</span></td>
         </tr>
         <tr>
@@ -129,8 +179,8 @@ def render_dashboard_html(summary: Dict[str, Any], telegram_configured: bool = F
         <tr>
             <td><code>BOT_5_PERP_ORDER_KEEPER</code></td>
             <td>Arbitrum One</td>
-            <td>GMX Vault (<code>{gmx_info.get('vault', '0x489e...97C4A')}</code>)</td>
-            <td>WETH MaxPrice: ${gmx_info.get('weth_max_price_usd', 0):,.4f} USD</td>
+            <td>GMX Vault (<code>{gmx_vault}</code>)</td>
+            <td>WETH MaxPrice: ${gmx_weth_price:,.4f} USD</td>
             <td><span class="badge ok">CONECTADO EN VIVO</span></td>
         </tr>
     """
@@ -206,7 +256,7 @@ def render_dashboard_html(summary: Dict[str, Any], telegram_configured: bool = F
         <tbody>{live_bots_rows}</tbody>
     </table>
 
-    <h2>2. Cola Central de Prioridad — Los 5 Bots en 1 Solo Motor</h2>
+    <h2>2. Cola Central de Prioridad en Vivo — Oportunidades Reales Detectadas</h2>
     <table>
         <thead>
             <tr>
@@ -215,12 +265,14 @@ def render_dashboard_html(summary: Dict[str, Any], telegram_configured: bool = F
                 <th>Estrategia de Comisión</th>
                 <th>Red</th>
                 <th>Gas Real USD</th>
-                <th>Ganancia Neta Simulada</th>
+                <th>Ganancia Neta Real</th>
                 <th>Estado</th>
             </tr>
         </thead>
-        <tbody>{queue_rows}</tbody>
+        <tbody>{live_queue_rows}</tbody>
     </table>
+
+    {stress_section_html}
 
     <h2>3. Estado de Redes y Bloques en Vivo (Mainnet)</h2>
     <table>
@@ -236,7 +288,7 @@ def render_dashboard_html(summary: Dict[str, Any], telegram_configured: bool = F
         <tbody>{chain_rows}</tbody>
     </table>
 
-    <h2>3. Oráculos Chainlink Verificados en Vivo (Fail-Closed)</h2>
+    <h2>4. Oráculos Chainlink Verificados en Vivo (Fail-Closed)</h2>
     <table>
         <thead>
             <tr>

@@ -250,7 +250,12 @@ class PositionIndexer:
 
         return candidates[:max_candidates]
 
-    def evaluate_borrower(self, market: Dict[str, Any], borrower: str) -> Dict[str, Any]:
+    def evaluate_borrower(
+        self,
+        market: Dict[str, Any],
+        borrower: str,
+        oracle_prices: Optional[Dict[str, float]] = None
+    ) -> Dict[str, Any]:
         """Reads live on-chain position health for a single borrower on the specified market."""
         chain = market["chain"]
         arch = market["architecture"]
@@ -273,16 +278,32 @@ class PositionIndexer:
 
         if arch == "compound_v2":
             raw_liq = self.rpc.eth_call(chain, controller, SELECTOR_GET_ACCOUNT_LIQUIDITY + padded_addr)
-            # Also check vUSDT (first vToken) borrowBalanceStored for accurate stable debt measurement
+            # Sum borrowBalanceStored across all configured vTokens using per-token decimals & live Chainlink prices
             measured_debt_usd = 0.0
-            vtokens = market.get("vtokens", [])
-            if vtokens:
-                raw_borrow = self.rpc.eth_call(chain, vtokens[0], SELECTOR_BORROW_BALANCE_STORED + padded_addr)
-                if raw_borrow and raw_borrow.startswith("0x") and len(raw_borrow) > 2:
-                    try:
-                        measured_debt_usd = round(int(raw_borrow, 16) / 1e18, 4)
-                    except ValueError:
-                        measured_debt_usd = 0.0
+            vtokens_meta = market.get("vtokens_meta")
+            if isinstance(vtokens_meta, list) and vtokens_meta:
+                for vt in vtokens_meta:
+                    vt_addr = vt.get("address")
+                    decimals = int(vt.get("underlying_decimals", 18))
+                    feed_key = vt.get("oracle_feed", "USDT_USD")
+                    token_price = (oracle_prices or {}).get(feed_key, float(vt.get("fallback_price_usd", 1.0)))
+                    raw_borrow = self.rpc.eth_call(chain, vt_addr, SELECTOR_BORROW_BALANCE_STORED + padded_addr)
+                    if raw_borrow and raw_borrow.startswith("0x") and len(raw_borrow) > 2:
+                        try:
+                            token_amount = int(raw_borrow, 16) / (10 ** decimals)
+                            measured_debt_usd += token_amount * float(token_price)
+                        except ValueError:
+                            continue
+                measured_debt_usd = round(measured_debt_usd, 4)
+            else:
+                vtokens = market.get("vtokens", [])
+                if vtokens:
+                    raw_borrow = self.rpc.eth_call(chain, vtokens[0], SELECTOR_BORROW_BALANCE_STORED + padded_addr)
+                    if raw_borrow and raw_borrow.startswith("0x") and len(raw_borrow) > 2:
+                        try:
+                            measured_debt_usd = round(int(raw_borrow, 16) / 1e18, 4)
+                        except ValueError:
+                            measured_debt_usd = 0.0
             return decode_compound_account_liquidity(raw_liq or "", borrower, market_id, measured_debt_usd)
 
         return {
