@@ -89,6 +89,7 @@ def decode_aave_v3_user_account_data(raw_hex: str, borrower: str, market_id: str
         "is_valid": True,
         "reason": "OK",
         "architecture": "aave_v3",
+        "hf_source": "HF nativo on-chain (getUserAccountData)",
         "market_id": market_id,
         "borrower": borrower,
         "total_collateral_usd": total_collateral_usd,
@@ -262,6 +263,7 @@ def decode_compound_account_liquidity(
         "is_valid": True,
         "reason": "OK",
         "architecture": "compound_v2",
+        "hf_source": "HF estimado (derivado de getAccountLiquidity)",
         "market_id": market_id,
         "borrower": borrower,
         "liquidity_excess_usd": liquidity_usd,
@@ -294,12 +296,13 @@ class PositionIndexer:
                 seen.add(low)
                 candidates.append(addr)
 
-        if not latest_block or latest_block <= 600:
+        lookback_blocks = int(market.get("log_lookback_blocks", 400))
+        if not latest_block or latest_block <= lookback_blocks:
             return candidates[:max_candidates]
 
         chain = market["chain"]
         target_addresses = market.get("vtokens", [market["controller_address"]])
-        from_blk = hex(max(1, latest_block - 400))
+        from_blk = hex(max(1, latest_block - lookback_blocks))
         to_blk = hex(latest_block)
 
         logs, _, _ = self.rpc.call_rpc(
@@ -366,8 +369,18 @@ class PositionIndexer:
                     decimals = int(vt.get("underlying_decimals", 18))
                     feed_key = vt.get("oracle_feed", "USDT_USD")
                     token_price = (oracle_prices or {}).get(feed_key)
-                    if token_price is None:
-                        continue
+                    # A2 Fail-Closed: missing or non-positive oracle feed for any configured vToken aborts evaluation
+                    if token_price is None or float(token_price) <= 0.0:
+                        return {
+                            "is_valid": False,
+                            "reason": "ORACLE_FEED_MISSING",
+                            "borrower": borrower,
+                            "market_id": market_id,
+                            "missing_feed": feed_key,
+                            "vtoken": vt.get("symbol", vt_addr),
+                            "health_factor": None,
+                            "is_liquidatable": False
+                        }
                     raw_borrow = self.rpc.eth_call(chain, vt_addr, SELECTOR_BORROW_BALANCE_STORED + padded_addr)
                     if raw_borrow is not None:
                         dec = decode_vtoken_borrow_balance_stored(raw_borrow, decimals)

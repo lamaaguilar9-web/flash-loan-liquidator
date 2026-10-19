@@ -151,37 +151,37 @@ def render_dashboard_html(summary: Dict[str, Any], telegram_configured: bool = F
         <tr>
             <td><code>BOT_1_FLASH_LIQUIDATION</code></td>
             <td>BNB / Arbitrum</td>
-            <td>Venus Comptroller, Kinza Pool, Aave V3 Pool</td>
+            <td>Venus Comptroller (<em>HF estimado derivado de getAccountLiquidity</em>), Kinza &amp; Aave V3 (<em>HF nativo on-chain</em>)</td>
             <td>{summary.get('positions_scanned_count', 0)} cuentas leídas | {summary.get('watchlist_count', 0)} en vigilancia</td>
-            <td><span class="badge ok">CONECTADO EN VIVO</span></td>
+            <td><span class="badge ok">EVALUADOR ECONÓMICO EN VIVO</span></td>
         </tr>
         <tr>
             <td><code>BOT_2_DEX_FLASH_ARBITRAGE</code></td>
             <td>BNB Chain</td>
             <td>PancakeSwap V3 (5 bps) ↔ V2 (25 bps)</td>
             <td>Compra ${arb.get('buy_price_usd', 0)} | Venta ${arb.get('sell_price_usd', 0)} | Spread {arb.get('spread_bps', 0)} bps</td>
-            <td><span class="badge ok">CONECTADO EN VIVO</span></td>
+            <td><span class="badge ok">EVALUADOR ECONÓMICO EN VIVO</span></td>
         </tr>
         <tr>
             <td><code>BOT_3_AUCTION_KICK_KEEPER</code></td>
             <td>BNB Chain</td>
             <td>Lista DAO lisUSD (<code>{lisusd_contract}</code>)</td>
-            <td>Suministro activo: {lisusd_supply:,.2f} lisUSD</td>
-            <td><span class="badge ok">CONECTADO EN VIVO</span></td>
+            <td>Suministro activo: {lisusd_supply:,.2f} lisUSD (PnL kick en banco de prueba)</td>
+            <td><span class="badge info">MONITOR ON-CHAIN EN VIVO</span></td>
         </tr>
         <tr>
             <td><code>BOT_4_VAULT_HARVEST_KEEPER</code></td>
             <td>BNB Chain</td>
             <td>Beefy Finance Vaults (<code>balance()</code>)</td>
-            <td>{beefy_summary}</td>
-            <td><span class="badge ok">CONECTADO EN VIVO</span></td>
+            <td>{beefy_summary} (PnL harvest en banco de prueba)</td>
+            <td><span class="badge info">MONITOR ON-CHAIN EN VIVO</span></td>
         </tr>
         <tr>
             <td><code>BOT_5_PERP_ORDER_KEEPER</code></td>
             <td>Arbitrum One</td>
             <td>GMX Vault (<code>{gmx_vault}</code>)</td>
-            <td>WETH MaxPrice: ${gmx_weth_price:,.4f} USD</td>
-            <td><span class="badge ok">CONECTADO EN VIVO</span></td>
+            <td>WETH MaxPrice: ${gmx_weth_price:,.4f} USD (PnL keeper en banco de prueba)</td>
+            <td><span class="badge info">MONITOR ON-CHAIN EN VIVO</span></td>
         </tr>
     """
 
@@ -218,7 +218,7 @@ def render_dashboard_html(summary: Dict[str, Any], telegram_configured: bool = F
     <div class="header">
         <div>
             <h1>🛡️ SENTINEL FLEET — MOTOR ÚNICO 5-EN-1 DE COMISIONES ON-CHAIN</h1>
-            <div style="font-size:13px;color:#94a3b8;margin-top:4px;">Actualización automática cada 15s | Último corte: {now_utc}</div>
+            <div style="font-size:13px;color:#94a3b8;margin-top:4px;">2 evaluadores económicos en vivo (liquidaciones Venus/Kinza/Aave + arbitraje DEX) + 3 monitores on-chain en vivo (Lista/Beefy/GMX) | Último corte: {now_utc}</div>
         </div>
         <div>{tg_badge}</div>
     </div>
@@ -230,7 +230,7 @@ def render_dashboard_html(summary: Dict[str, Any], telegram_configured: bool = F
         </div>
         <div class="card">
             <div class="card-title">Contrato Fase 2 (Solidity 0.8.20)</div>
-            <div class="card-value" style="color:#34d399;">COMPILADO (8,130 bytes)</div>
+            <div class="card-value" style="color:#34d399;">COMPILADO (8,323 bytes)</div>
         </div>
         <div class="card">
             <div class="card-title">Spread DEX en Vivo (WBNB/USDT V2 vs V3)</div>
@@ -242,7 +242,7 @@ def render_dashboard_html(summary: Dict[str, Any], telegram_configured: bool = F
         </div>
     </div>
 
-    <h2>1. Telemetría en Vivo de los 5 Bots (Conexión RPC Directa — Costo $0)</h2>
+    <h2>1. Estado On-Chain: 2 Evaluadores Económicos en Vivo + 3 Monitores On-Chain en Vivo (Costo $0)</h2>
     <table>
         <thead>
             <tr>
@@ -250,7 +250,7 @@ def render_dashboard_html(summary: Dict[str, Any], telegram_configured: bool = F
                 <th>Red</th>
                 <th>Contrato On-Chain Consultado</th>
                 <th>Lectura en Vivo</th>
-                <th>Conexión</th>
+                <th>Rol Actual en Vivo</th>
             </tr>
         </thead>
         <tbody>{live_bots_rows}</tbody>

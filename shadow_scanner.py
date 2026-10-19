@@ -1,12 +1,16 @@
 """
 Flash Loan Liquidator (Module C) - Unified 5-in-1 On-Chain Commission Engine CLI.
 
-100% Read-Only On-Chain Scanner executing live eth_call telemetry for all 5 commission strategies:
-  1. Bot #1: Liquidaciones con Flash Loans (Venus / Kinza / Aave V3)
-  2. Bot #2: Arbitraje Atómico DEX-a-DEX con Flash Swaps (PancakeSwap V3 <-> V2 en vivo)
-  3. Bot #3: Bounties de "Kick" de Subastas (Lista DAO lisUSD 0x0782...41E5 en vivo)
-  4. Bot #4: Cosechadores de Bóvedas Harvest Keepers (Beefy Finance BSC Vaults en vivo)
-  5. Bot #5: Keepers de Órdenes Límite y Perpetuos (GMX Vault Arbitrum 0x489e...97C4A en vivo)
+100% Read-Only On-Chain Scanner executing:
+  - 2 evaluadores económicos en vivo (liquidaciones Venus/Kinza/Aave + arbitraje DEX)
+  - 3 monitores on-chain en vivo (Lista/Beefy/GMX)
+
+Detalle de módulos:
+  1. Bot #1 [Evaluador Económico en Vivo]: Liquidaciones con Flash Loans (Venus HF estimado / Kinza & Aave V3 HF nativo)
+  2. Bot #2 [Evaluador Económico en Vivo]: Arbitraje Atómico DEX-a-DEX con Flash Swaps (PancakeSwap V3 <-> V2 en vivo)
+  3. Bot #3 [Monitor On-Chain en Vivo]: Subastas Lista DAO lisUSD (0x0782...41E5 totalSupply() en vivo; kick PnL en banco de prueba)
+  4. Bot #4 [Monitor On-Chain en Vivo]: Bóvedas Beefy Finance BSC (balance() LP en vivo; harvest PnL en banco de prueba)
+  5. Bot #5 [Monitor On-Chain en Vivo]: Perpetuos GMX Vault Arbitrum (0x489e...97C4A getMaxPrice() en vivo; keeper PnL en banco de prueba)
 """
 
 import os
@@ -69,16 +73,28 @@ class FlashLoanShadowScanner:
             chain_states[chain] = self.rpc.get_chain_state(chain)
             oracle_snapshots[chain] = self.oracle_watcher.fetch_all_oracles(chain)
 
-        # Live DEX Pool reads on BNB Chain (PancakeSwap V3 & V2) for Bot #1 and Bot #2
+        # Live DEX Pool reads on BNB Chain (PancakeSwap V3 & V2) for Bot #1 and Bot #2.
+        # Uniswap V2/V3 sort tokens lexicographically by address (token0 < token1):
+        # USDT (0x55d3...) < WBNB (0xbb4C...), so token0=USDT and token1=WBNB.
+        v3_cfg = self.config.get("dex_liquidity_pools", {}).get("PancakeSwap_V3_WBNB_USDT", {})
         dex_v3_state = self.oracle_watcher.fetch_dex_pool_state("PancakeSwap_V3_WBNB_USDT")
         pool_liq = dex_v3_state.get("in_range_liquidity") if dex_v3_state.get("is_valid") else None
-        v3_wbnb_price = (1.0 / dex_v3_state["spot_price"]) if (dex_v3_state.get("is_valid") and dex_v3_state.get("spot_price", 0) > 0) else None
+        v3_invert = bool(v3_cfg.get("invert_price", True))
+        if dex_v3_state.get("is_valid") and dex_v3_state.get("spot_price", 0) > 0:
+            v3_wbnb_price = (1.0 / dex_v3_state["spot_price"]) if v3_invert else float(dex_v3_state["spot_price"])
+        else:
+            v3_wbnb_price = None
 
-        v2_addr = self.config.get("dex_liquidity_pools", {}).get("PancakeSwap_V2_WBNB_USDT", {}).get(
-            "address", "0x16b9a82891338f9bA80E2D6970FddA79D1eb0daE"
-        )
+        v2_cfg = self.config.get("dex_liquidity_pools", {}).get("PancakeSwap_V2_WBNB_USDT", {})
+        v2_addr = v2_cfg.get("address", "0x16b9a82891338f9bA80E2D6970FddA79D1eb0daE")
+        v2_invert = bool(v2_cfg.get("invert_price", False))
         raw_v2_res = self.rpc.eth_call("BNB", v2_addr, SELECTOR_GET_RESERVES_V2) if "BNB" in target_chains else None
-        dex_v2_state = decode_uniswap_v2_reserves(raw_v2_res or "")
+        dex_v2_state = decode_uniswap_v2_reserves(
+            raw_v2_res or "",
+            decimals0=int(v2_cfg.get("token0_decimals", 18)),
+            decimals1=int(v2_cfg.get("token1_decimals", 18)),
+            invert_price=v2_invert
+        )
         v2_wbnb_price = dex_v2_state.get("spot_price_usd") if dex_v2_state.get("is_valid") else None
 
         # Live Bot #2 Check: Real-time spread between PancakeSwap V3 and V2
@@ -198,6 +214,7 @@ class FlashLoanShadowScanner:
                     )
                     eval_res["strategy_id"] = "BOT_1_FLASH_LIQUIDATION"
                     eval_res["strategy_type"] = "LIQUIDATION_FLASH_LOAN"
+                    eval_res["hf_source"] = pos.get("hf_source")
                     eval_res["block_number"] = latest_block
                     self.shadow_logger.log_liquidation_evaluation(eval_res, is_test=False)
                     live_opportunities.append(eval_res)
@@ -212,6 +229,12 @@ class FlashLoanShadowScanner:
             bnb_valid = bool(bnb_feed.get("is_valid", False))
             venus_market = next((m for m in markets if m["market_id"] == "Venus_Core_BSC"), markets[0])
 
+            arb_state = chain_states.get("ARBITRUM", bnb_state)
+            arb_eth_feed = oracle_snapshots.get("ARBITRUM", {}).get("ETH_USD") or oracle_snapshots.get("BNB", {}).get("ETH_USD", {})
+            arb_eth_price = arb_eth_feed.get("price_usd") or bnb_price
+            arb_gas = arb_state.get("gas_price_gwei") or bnb_gas
+            arb_valid = bool(arb_eth_feed.get("is_valid", bnb_valid))
+
             ev1 = self.profit_simulator.evaluate_liquidation(
                 position={
                     "is_valid": True,
@@ -222,7 +245,8 @@ class FlashLoanShadowScanner:
                     "total_collateral_usd": 14500.0,
                     "total_debt_usd": 12000.0,
                     "shortfall_usd": 720.0,
-                    "health_factor": 0.9434
+                    "health_factor": 0.9434,
+                    "hf_source": "HF estimado (derivado de getAccountLiquidity)"
                 },
                 market=venus_market,
                 native_token_price_usd=bnb_price,
@@ -232,6 +256,7 @@ class FlashLoanShadowScanner:
             )
             ev1["strategy_id"] = "BOT_1_FLASH_LIQUIDATION"
             ev1["strategy_type"] = "LIQUIDATION_FLASH_LOAN"
+            ev1["hf_source"] = "HF estimado (derivado de getAccountLiquidity)"
 
             ev2 = self.unified_engine.evaluate_dex_flash_arbitrage(
                 pair_symbol="WBNB/USDT",
@@ -272,25 +297,27 @@ class FlashLoanShadowScanner:
                 oracle_is_valid=bnb_valid
             )
 
+            # N1: GMX_Vault_Arbitrum runs on ARBITRUM chain using live Arbitrum ETH price & gas
             ev5 = self.unified_engine.evaluate_perp_order_keeper(
                 protocol="GMX_Vault_Arbitrum",
-                chain="BNB",
-                order_id="ORD-BNB-90412",
+                chain="ARBITRUM",
+                order_id="ORD-ARB-90412",
                 order_type="LIQUIDATION",
                 direction="LONG",
-                trigger_price_usd=(bnb_price or 727.0) + 5.0,
-                current_oracle_price_usd=bnb_price,
+                trigger_price_usd=(arb_eth_price or 2600.0) + 5.0,
+                current_oracle_price_usd=arb_eth_price,
                 position_size_usd=15000.0,
                 execution_fee_usd=2.50,
                 keeper_bonus_rate=0.002,
-                native_token_price_usd=bnb_price,
-                gas_price_gwei=bnb_gas,
-                oracle_is_valid=bnb_valid
+                native_token_price_usd=arb_eth_price,
+                gas_price_gwei=arb_gas,
+                oracle_is_valid=arb_valid
             )
 
             stress_evaluations = [ev1, ev2, ev3, ev4, ev5]
             for ev in stress_evaluations:
-                ev["block_number"] = bnb_state.get("block_number")
+                ev_chain = ev.get("chain", "BNB")
+                ev["block_number"] = chain_states.get(ev_chain, bnb_state).get("block_number")
                 ev["stress_test_case"] = True
                 self.shadow_logger.log_liquidation_evaluation(ev, is_test=True)
 
@@ -299,6 +326,10 @@ class FlashLoanShadowScanner:
         elapsed_ms = round((time.perf_counter() - t0) * 1000, 2)
         summary = {
             "elapsed_ms": elapsed_ms,
+            "architecture_scope": (
+                "2 evaluadores económicos en vivo (liquidaciones Venus/Kinza/Aave + arbitraje DEX) "
+                "+ 3 monitores on-chain en vivo (Lista/Beefy/GMX)"
+            ),
             "chains": chain_states,
             "oracles": oracle_snapshots,
             "dex_v3_pool": dex_v3_state,
@@ -326,6 +357,8 @@ def print_console_report(summary: Dict[str, Any]) -> None:
     """Formats a console report of the Unified 5-in-1 Shadow Mode Commission Engine."""
     print("=" * 84)
     print(" SENTINEL FLEET — MOTOR ÚNICO 5-EN-1 DE COMISIONES ON-CHAIN (MODO SOMBRA)")
+    print(" Alcance: 2 evaluadores económicos en vivo (liquidaciones Venus/Kinza/Aave + arbitraje DEX)")
+    print("        + 3 monitores on-chain en vivo (Lista/Beefy/GMX)")
     print("=" * 84)
     for chain, st in summary.get("chains", {}).items():
         print(
@@ -345,28 +378,28 @@ def print_console_report(summary: Dict[str, Any]) -> None:
 
     print("-" * 84)
     print(
-        f"[*] Bot #1 Préstamos Escaneados On-Chain (Venus/Kinza/Aave): {summary.get('positions_scanned_count')} | "
-        f"En Vigilancia: {summary.get('watchlist_count')}"
+        f"[*] Bot #1 [Evaluador Económico en Vivo] Préstamos Escaneados (Venus HF estimado derivado de getAccountLiquidity / Kinza & Aave HF nativo): "
+        f"{summary.get('positions_scanned_count')} | En Vigilancia: {summary.get('watchlist_count')}"
     )
 
     arb_live = summary.get("live_dex_arb_check")
     if arb_live:
         print(
-            f"[*] Bot #2 Arbitraje DEX en Vivo (WBNB/USDT): Buy {arb_live.get('buy_pool')}=${arb_live.get('buy_price_usd')} | "
+            f"[*] Bot #2 [Evaluador Económico en Vivo] Arbitraje DEX (WBNB/USDT): Buy {arb_live.get('buy_pool')}=${arb_live.get('buy_price_usd')} | "
             f"Sell {arb_live.get('sell_pool')}=${arb_live.get('sell_price_usd')} | Spread={arb_live.get('spread_bps')} bps [{arb_live.get('status')}]"
         )
 
     b3 = summary.get("live_bot3_lista", {})
     if b3:
-        print(f"[*] Bot #3 Subastas Lista DAO en Vivo ({b3.get('token_address')}): Supply={b3.get('live_lisusd_supply')} lisUSD [{b3.get('status')}]")
+        print(f"[*] Bot #3 [Monitor On-Chain en Vivo] Subastas Lista DAO ({b3.get('token_address')}): Supply={b3.get('live_lisusd_supply')} lisUSD [{b3.get('status')}]")
 
     b4_list = summary.get("live_bot4_beefy", [])
     for b4 in b4_list:
-        print(f"[*] Bot #4 Bóveda Beefy en Vivo ({b4.get('vault_id')}): Balance LP={b4.get('live_lp_balance')} | CallFee={b4.get('call_fee_bps')} bps [{b4.get('status')}]")
+        print(f"[*] Bot #4 [Monitor On-Chain en Vivo] Bóveda Beefy ({b4.get('vault_id')}): Balance LP={b4.get('live_lp_balance')} | CallFee={b4.get('call_fee_bps')} bps [{b4.get('status')}]")
 
     b5 = summary.get("live_bot5_gmx", {})
     if b5:
-        print(f"[*] Bot #5 Perpetuos GMX Arbitrum en Vivo ({b5.get('vault_address')}): WETH MaxPrice=${b5.get('live_weth_max_price_usd')} [{b5.get('status')}]")
+        print(f"[*] Bot #5 [Monitor On-Chain en Vivo] Perpetuos GMX Arbitrum ({b5.get('vault_address')}): WETH MaxPrice=${b5.get('live_weth_max_price_usd')} [{b5.get('status')}]")
 
     live_q = summary.get("live_priority_queue", [])
     print("-" * 84)

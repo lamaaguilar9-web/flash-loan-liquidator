@@ -284,3 +284,60 @@ def test_18_central_profit_priority_queue_ranks_all_5_bots():
         "BOT_2_DEX_FLASH_ARBITRAGE",
         "BOT_4_VAULT_HARVEST_KEEPER"
     ]
+
+
+def test_19_kimi_adjudicated_fixes_a1_a2_m1_m2():
+    from position_indexer import PositionIndexer
+
+    # A1: HF source labels distinguish Venus derived HF from Aave/Kinza native HF
+    borrower = "0x955b7a7ddcbf443d0e6b899ba1aba71f7413272f"
+    raw_aave = _pack_words(10000 * (10 ** 8), 8500 * (10 ** 8), 0, 8000, 7500, int(0.94 * (10 ** 18)))
+    pos_aave = decode_aave_v3_user_account_data(raw_aave, borrower, "Kinza_Finance_BSC")
+    assert pos_aave["hf_source"] == "HF nativo on-chain (getUserAccountData)"
+
+    raw_comp = _pack_words(0, 129964 * (10 ** 18), 0)
+    pos_comp = decode_compound_account_liquidity(raw_comp, borrower, "Venus_Core_BSC", measured_debt_usd=108067.75)
+    assert pos_comp["hf_source"] == "HF estimado (derivado de getAccountLiquidity)"
+
+    # A2: Missing oracle feed for any configured vToken returns fail-closed ORACLE_FEED_MISSING
+    class DummyRPC:
+        def eth_call(self, chain, to, data):
+            if data.startswith("0x5ec88c79"):
+                return _pack_words(0, 1000 * (10 ** 18), 0)
+            return "0x" + ("0" * 64)
+
+    indexer = PositionIndexer(DummyRPC(), {})
+    venus_mkt = {
+        "market_id": "Venus_Core_BSC",
+        "chain": "BNB",
+        "architecture": "compound_v2",
+        "controller_address": "0xfD36E2c2a6789Db23113685031d7F16329158384",
+        "vtokens_meta": [
+            {"symbol": "vUSDT", "address": "0xfD5840Cd36d94D7229439859C0112a4185BC0255", "underlying_decimals": 18, "oracle_feed": "USDT_USD"},
+            {"symbol": "vBTC", "address": "0x882C173bC7Ff3b7786CA16dfeD3DFFfb9Ee7847B", "underlying_decimals": 18, "oracle_feed": "BTC_USD"}
+        ]
+    }
+    # Missing BTC_USD in oracle_prices -> fail-closed ORACLE_FEED_MISSING
+    missing_res = indexer.evaluate_borrower(venus_mkt, borrower, oracle_prices={"USDT_USD": 1.0})
+    assert missing_res["is_valid"] is False
+    assert missing_res["reason"] == "ORACLE_FEED_MISSING"
+    assert missing_res["missing_feed"] == "BTC_USD"
+
+    # M1: decode_uniswap_v2_reserves respects invert_price
+    raw_v2 = _pack_words(28785000 * (10 ** 18), 39500 * (10 ** 18), 1760570000)
+    res_direct = decode_uniswap_v2_reserves(raw_v2, invert_price=False)
+    res_inverted = decode_uniswap_v2_reserves(raw_v2, invert_price=True)
+    assert res_direct["spot_price_usd"] == pytest.approx(28785000.0 / 39500.0, rel=1e-4)
+    assert res_inverted["spot_price_usd"] == pytest.approx(39500.0 / 28785000.0, abs=1e-6)
+
+    # M2: pool_in_range_liquidity=None applies worst-case +150 bps thin-liquidity penalty (never optimistic)
+    sim = ProfitSimulator({"min_net_profit_usd": 1.50})
+    pos = {"is_valid": True, "is_liquidatable": True, "borrower": "0xdEaD", "health_factor": 0.92, "total_collateral_usd": 20000.0, "total_debt_usd": 16000.0}
+    mkt = {"market_id": "Venus_Core_BSC", "chain": "BNB", "close_factor": 0.50, "liquidation_bonus": 0.10}
+    eval_deep = sim.evaluate_liquidation(pos, mkt, 720.0, 1.0, oracle_is_valid=True, pool_in_range_liquidity=5 * (10 ** 21))
+    eval_none = sim.evaluate_liquidation(pos, mkt, 720.0, 1.0, oracle_is_valid=True, pool_in_range_liquidity=None)
+    eval_thin = sim.evaluate_liquidation(pos, mkt, 720.0, 1.0, oracle_is_valid=True, pool_in_range_liquidity=10 ** 15)
+    assert eval_none["effective_slippage_bps"] == pytest.approx(eval_thin["effective_slippage_bps"])
+    assert eval_none["dex_swap_cost_usd"] > eval_deep["dex_swap_cost_usd"]
+    assert eval_none["net_profit_usd"] < eval_deep["net_profit_usd"]
+

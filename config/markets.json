@@ -1,11 +1,15 @@
 {
-  "version": "2.1.0-unified-5-in-1-live",
+  "version": "2.2.0-unified-5-in-1-live",
   "mode": "MODO_SOMBRA_SOLO_LECTURA",
   "min_net_profit_usd": 1.50,
   "watchlist_hf_threshold": 1.08,
   "liquidation_hf_threshold": 1.00,
   "max_flash_loan_usd": 250000.0,
   "default_gas_limit": 450000,
+  "base_slippage_rate": 0.0010,
+  "thin_liquidity_penalty_rate": 0.0150,
+  "thin_liquidity_threshold_wei": 1000000000000000000,
+  "size_impact_scale_usd": 5000000.0,
   "rpc_endpoints": {
     "BNB": [
       "https://bsc-rpc.publicnode.com",
@@ -57,12 +61,19 @@
     "PancakeSwap_V3_WBNB_USDT": {
       "chain": "BNB",
       "address": "0x36696169C63e42cd08ce11f5deeBbCeBae652050",
+      "token0_symbol": "USDT",
+      "token1_symbol": "WBNB",
+      "invert_price": true,
       "flash_fee_rate": 0.0005,
       "swap_fee_rate": 0.0005
     },
     "PancakeSwap_V2_WBNB_USDT": {
       "chain": "BNB",
       "address": "0x16b9a82891338f9bA80E2D6970FddA79D1eb0daE",
+      "token0_symbol": "USDT",
+      "token1_symbol": "WBNB",
+      "invert_price": false,
+      "ordering_rule": "UniswapV2 sorts token0 < token1 by address: USDT (0x55d3...) < WBNB (0xbb4C...), so reserve0/reserve1 = USDT per WBNB (invert_price=false)",
       "swap_fee_rate": 0.0025
     }
   },
@@ -107,6 +118,7 @@
       "protocol": "Venus Protocol",
       "architecture": "compound_v2",
       "controller_address": "0xfD36E2c2a6789Db23113685031d7F16329158384",
+      "log_lookback_blocks": 400,
       "close_factor": 0.50,
       "liquidation_bonus": 0.10,
       "flash_loan_provider": "PancakeSwap_V3",
@@ -163,6 +175,7 @@
       "protocol": "Kinza Finance (Aave v3 BSC)",
       "architecture": "aave_v3",
       "controller_address": "0xcb0620b181140e57d1C0D8b724cde623cA963c8C",
+      "log_lookback_blocks": 400,
       "close_factor": 0.50,
       "liquidation_bonus": 0.075,
       "flash_loan_provider": "PancakeSwap_V3",
@@ -179,13 +192,15 @@
       "protocol": "Aave V3 Arbitrum",
       "architecture": "aave_v3",
       "controller_address": "0x794a61358D6845594F94dc1DB02A252b5b4814aD",
+      "log_lookback_blocks": 600,
       "close_factor": 0.50,
       "liquidation_bonus": 0.05,
       "flash_loan_provider": "Aave_V3_Flash",
       "flash_loan_fee_rate": 0.0005,
       "dex_swap_fee_rate": 0.0005,
       "seed_borrowers": [
-        "0x794a61358D6845594F94dc1DB02A252b5b4814aD"
+        "0x955b7a7ddcbf443d0e6b899ba1aba71f7413272f",
+        "0x489A8756C18C0b8B24EC2a2b9FF3D4d447F79BEc"
       ]
     }
   ]

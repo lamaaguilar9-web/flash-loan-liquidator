@@ -109,12 +109,21 @@ class ProfitSimulator:
         # Step 3: Flash Loan Fee
         flash_loan_fee_usd = debt_to_cover_usd * flash_fee_rate
 
-        # Step 4: DEX Swap Fee + Dynamic Price Impact Slippage
-        base_slippage_rate = 0.0010  # 10 bps baseline execution slippage
-        size_impact_rate = min(0.05, (collateral_seized_usd / 5_000_000.0) * 0.005)
-        if pool_in_range_liquidity is not None and pool_in_range_liquidity < (10 ** 18):
-            # Penalize slippage if active tick liquidity is thin
-            size_impact_rate = min(0.08, size_impact_rate + 0.015)
+        # Step 4: DEX Swap Fee + Dynamic Price Impact Slippage (N2 & M2 calibrated model)
+        # Origin of parameters (config/markets.json):
+        #   - base_slippage_rate (10 bps): baseline V3 tick crossing + MEV execution variance
+        #   - size_impact_scale_usd ($5M): linear price impact scaling on deep V3 pools (50 bps per $5M)
+        #   - thin_liquidity_penalty_rate (+150 bps): worst-case penalty when V3 active tick liquidity < 1e18
+        #     OR when V3 pool liquidity read is unavailable (pool_in_range_liquidity is None, M2 fail-safe)
+        base_slippage_rate = float(self.config.get("base_slippage_rate", 0.0010))
+        thin_liquidity_penalty = float(self.config.get("thin_liquidity_penalty_rate", 0.0150))
+        thin_liquidity_threshold = int(self.config.get("thin_liquidity_threshold_wei", 10 ** 18))
+        size_impact_scale_usd = float(self.config.get("size_impact_scale_usd", 5_000_000.0))
+
+        size_impact_rate = min(0.05, (collateral_seized_usd / size_impact_scale_usd) * 0.005)
+        if pool_in_range_liquidity is None or pool_in_range_liquidity < thin_liquidity_threshold:
+            # Penalize slippage worst-case (+150 bps) if active tick liquidity is thin or V3 read failed (M2)
+            size_impact_rate = min(0.08, size_impact_rate + thin_liquidity_penalty)
 
         effective_slippage_rate = base_slippage_rate + size_impact_rate
         dex_swap_cost_usd = collateral_seized_usd * (dex_swap_fee_rate + effective_slippage_rate)

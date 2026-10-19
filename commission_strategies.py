@@ -1,13 +1,15 @@
 """
 Flash Loan Liquidator (Module C) - Unified 5-in-1 On-Chain Commission Engine.
 
-Runs all 5 on-chain commission bots inside a single process, sharing one memory space,
-one RPC connection pool, and one central Profit Priority Queue:
-  1. Bot #1 (STRATEGY_1_FLASH_LIQUIDATION): Lending liquidations with Flash Loans (Venus/Kinza/Aave)
-  2. Bot #2 (STRATEGY_2_DEX_FLASH_ARBITRAGE): Atomic DEX-to-DEX Flash Swap arbitrage (PancakeSwap V3 <-> V2)
-  3. Bot #3 (STRATEGY_3_AUCTION_KICK_KEEPER): Collateralized stablecoin Dutch Auction kick() keeper (Lista DAO)
-  4. Bot #4 (STRATEGY_4_VAULT_HARVEST_KEEPER): Auto-compounding yield vault harvest() callFee keeper (Beefy)
-  5. Bot #5 (STRATEGY_5_PERP_ORDER_AND_LIQ_KEEPER): Perpetual DEX limit/stop-loss & margin liquidation keeper (GMX/ApolloX)
+Official Live Operational Scope (M3 Policy):
+  - 2 Live Economic Evaluators (Lending Liquidations on Venus/Kinza/Aave + DEX Flash Arbitrage)
+  - 3 Live On-Chain Monitors (Lista DAO lisUSD, Beefy Finance Vaults, GMX Arbitrum Vault)
+  - Plus mathematical PnL evaluators for all 5 strategies inside a single memory space:
+    1. Bot #1 (STRATEGY_1_FLASH_LIQUIDATION): Lending liquidations with Flash Loans (Venus/Kinza/Aave)
+    2. Bot #2 (STRATEGY_2_DEX_FLASH_ARBITRAGE): Atomic DEX-to-DEX Flash Swap arbitrage (PancakeSwap V3 <-> V2)
+    3. Bot #3 (STRATEGY_3_AUCTION_KICK_KEEPER): Collateralized stablecoin Dutch Auction kick() keeper (Lista DAO)
+    4. Bot #4 (STRATEGY_4_VAULT_HARVEST_KEEPER): Auto-compounding yield vault harvest() callFee keeper (Beefy)
+    5. Bot #5 (STRATEGY_5_PERP_ORDER_AND_LIQ_KEEPER): Perpetual DEX limit/stop-loss & margin liquidation keeper (GMX/ApolloX)
 """
 
 from typing import Dict, Any, List, Optional
@@ -27,7 +29,18 @@ def decode_uniswap_v2_reserves(
     decimals1: int = 18,
     invert_price: bool = False
 ) -> Dict[str, Any]:
-    """Decodes PancakeSwap V2 / Uniswap V2 getReserves() response."""
+    """
+    Decodes PancakeSwap V2 / Uniswap V2 getReserves() response.
+
+    Uniswap V2 Token Ordering Rule (M1):
+      In Uniswap V2 / PancakeSwap V2 pairs, token0 and token1 are sorted immutably by address
+      (token0 < token1).
+      - For WBNB/USDT (0x16b9a828...): USDT (0x55d398...) < WBNB (0xbb4CdB...), so token0=USDT
+        and token1=WBNB. Thus reserve0/reserve1 yields USD per WBNB (invert_price=False).
+      - If a future pool has base asset < quote asset (e.g., BTCB 0x7130d2... < USDT 0x55d398...),
+        token0=BTCB and token1=USDT, so invert_price=True must be set in config/markets.json
+        to compute reserve1/reserve0.
+    """
     if not raw_hex or not isinstance(raw_hex, str) or not raw_hex.startswith("0x") or len(raw_hex) < 130:
         return {"is_valid": False, "reason": "INVALID_V2_RESERVES_HEX"}
 
@@ -49,6 +62,7 @@ def decode_uniswap_v2_reserves(
         "is_valid": True,
         "reserve0": round(reserve0, 4),
         "reserve1": round(reserve1, 4),
+        "invert_price": invert_price,
         "spot_price_usd": round(spot_price, 6)
     }
 
